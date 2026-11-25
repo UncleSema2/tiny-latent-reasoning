@@ -1,11 +1,11 @@
 [lvr]
 paper = "https://arxiv.org/html/2509.24251v2"
-tasks_7b = ["vstar_bench", "vstar_bench_direct_attributes", "vstar_bench_relative_position", "mmvp", "blink_counting", "blink_iq_test", "blink_jigsaw", "blink_relative_reflectance", "blink_spatial_relation"]
-tasks_3b = ["vstar_bench", "vstar_bench_direct_attributes", "vstar_bench_relative_position", "mmvp", "blink_iq_test", "blink_jigsaw"]
+tasks_7b = ["vstar_bench", "tlr_vstar_direct_attributes", "tlr_vstar_relative_position", "mmvp", "blink_counting", "blink_iq_test", "blink_jigsaw", "blink_relative_reflectance", "blink_spatial_relation"]
+tasks_3b = ["vstar_bench", "tlr_vstar_direct_attributes", "tlr_vstar_relative_position", "mmvp", "blink_iq_test", "blink_jigsaw"]
 
 [hylar]
 paper = "https://arxiv.org/html/2604.20328v2"
-tasks_7b = ["vstar_bench", "vstar_bench_direct_attributes", "vstar_bench_relative_position", "hrbench4k", "hrbench8k", "mmvp", "mmstar", "seedbench_2_plus", "blink", "hallusion_bench_image"]
+tasks_7b = ["vstar_bench", "tlr_vstar_direct_attributes", "tlr_vstar_relative_position", "hrbench4k", "hrbench8k", "mmvp", "mmstar", "seedbench_2_plus", "blink", "hallusion_bench_image"]
 tasks_3b = ["vstar_bench", "hrbench4k", "hrbench8k", "mmvp", "mmstar", "seedbench_2_plus"]
 
 [lut]

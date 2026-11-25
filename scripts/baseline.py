@@ -44,6 +44,7 @@ def main():
         "--batch_size",
         str(args.batch_size),
         "--log_samples",
+        "--fail_on_error",
         "--output_path",
         str(args.output.resolve()),
     ]
