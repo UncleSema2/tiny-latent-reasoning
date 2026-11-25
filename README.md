@@ -8,9 +8,15 @@ Reproductions of latent visual reasoning methods. The first milestone is checkpo
 | [HyLaR](https://arxiv.org/html/2604.20328v2) | 3B, 7B | V*, HRBench 4K and 8K, MMVP, MMStar, SEED-Bench-2-Plus, BLINK, HallusionBench |
 | [LUT](https://arxiv.org/html/2608.00743v1) | 7B | V*, HRBench 4K and 8K, MME-RealWorld-Lite, MMStar, BLINK, VisualPuzzles |
 
+## Reproduction plan
+
+1. **Establish the baseline.** Pin checkpoints, data and the evaluation harness. Run each base model on its paper's full suite and compare the same splits and scoring conventions.
+2. **Implement each method.** Give LVR, HyLaR and LUT separate training recipes with pinned inputs, latent-step settings, seeds and checkpoint metadata. Validate each recipe on a small run before scaling training.
+3. **Evaluate trained checkpoints.** Run each method on its original suite, record accuracy and inference cost alongside the base model, and expose training and evaluation through one command per paper. Re-run the existing recipe checks when adding a method.
+
 ## Benchmark results
 
-Scores are percentages except for mean output tokens. Every local column comes from a complete run of the base Qwen2.5-VL-Instruct checkpoint on the named suite. A dash marks an unmeasured or unpublished entry. V* overall includes both subsets. Each MMVP pair contains two questions.
+Scores are percentages except for mean output tokens. Every local column comes from a complete run of the base Qwen2.5-VL-Instruct checkpoint on the named suite. A dash marks an unmeasured or unpublished entry. V* overall includes both subsets. When a suite runs only V* overall, the subset scores use the category on each scored prediction. Each MMVP pair contains two questions.
 
 ### Qwen2.5-VL-3B-Instruct
 
@@ -19,8 +25,8 @@ HyLaR Table 4 reports six base-model scores. Differences below subtract the publ
 | Benchmark and metric | Examples or pairs | LVR suite (ours) | HyLaR suite (ours) | HyLaR paper | HyLaR Δ (pp) |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | V* overall | 191 | 75.39 | 76.44 | 70.68 | +5.76 |
-| V* Direct Attributes | 115 | 84.35 | — | — | — |
-| V* Relative Position | 76 | 61.84 | — | — | — |
+| V* Direct Attributes | 115 | 84.35 | 84.35 | — | — |
+| V* Relative Position | 76 | 61.84 | 64.47 | — | — |
 | MMVP question accuracy | 300 | 64.00 | 65.00 | 62.00 | +3.00 |
 | MMVP pair accuracy | 150 | 34.00 | 34.67 | — | — |
 | BLINK IQ-Test | 150 | 26.67 | — | — | — |
@@ -48,36 +54,75 @@ HyLaR Table 4 reports six base-model scores. Differences below subtract the publ
 
 The LVR paper reports trained 3B models at 4, 8 and 16 latent steps. For example, its 67.0 on V* and 58.0 on MMVP are scores after RL at 8 and 16 steps respectively. LUT evaluates 7B models. [LVR, Table 2](https://arxiv.org/html/2509.24251v2#S4.T2) · [LUT, Section 4](https://arxiv.org/html/2608.00743v1#S4)
 
-### Published Qwen2.5-VL-7B baselines
+### Qwen2.5-VL-7B-Instruct
 
-Each column gives the base model score as reported by that paper. A dash means the main tables omit that metric for the base model. The project has completed the 3B run above; local 7B results are pending. [LVR, Table 1](https://arxiv.org/html/2509.24251v2#S4.T1) · [HyLaR, Tables 1–2](https://arxiv.org/html/2604.20328v2#S4.T1) · [LUT, Tables 1–3](https://arxiv.org/html/2608.00743v1#S4.T1)
+Each suite has a local and a published column. The local HallusionBench score uses answer accuracy on the image split. HyLaR gives one HallusionBench score without specifying that scorer. [LVR, Table 1](https://arxiv.org/html/2509.24251v2#S4.T1) · [HyLaR, Tables 1–2](https://arxiv.org/html/2604.20328v2#S4.T1) · [LUT, Tables 1–3](https://arxiv.org/html/2608.00743v1#S4.T1)
 
-| Benchmark and metric (%) | LVR | HyLaR | LUT |
-| --- | ---: | ---: | ---: |
-| V* overall | 78.5 | 76.44 | 76.44 |
-| V* Direct Attributes | 81.7 | 77.39 | 77.39 |
-| V* Relative Position | 73.7 | 75.00 | 75.00 |
-| MMVP (paper score) | 66.7 | 65.67 | — |
-| BLINK overall | — | 53.60 | 53.60 |
-| BLINK Counting | 66.7 | — | — |
-| BLINK IQ-Test | 26.0 | — | — |
-| BLINK Jigsaw | 52.0 | — | — |
-| BLINK Relative Reflectance | 38.8 | — | — |
-| BLINK Spatial Relation | 87.4 | — | — |
-| HRBench-4K overall | — | 68.00 | 67.00 |
-| HRBench-4K single | — | 80.25 | 83.50 |
-| HRBench-4K cross | — | 55.75 | 50.50 |
-| HRBench-8K overall | — | 63.75 | 64.38 |
-| HRBench-8K single | — | 73.75 | 76.50 |
-| HRBench-8K cross | — | 53.75 | 52.25 |
-| MMStar | — | 59.70 | 59.70 |
-| SEED-Bench-2-Plus | — | 65.31 | — |
-| HallusionBench | — | 56.57 | — |
-| MME-RealWorld-Lite overall | — | — | 43.67 |
-| MME-RealWorld-Lite reasoning | — | — | 36.00 |
-| MME-RealWorld-Lite perception | — | — | 48.59 |
-| VisualPuzzles | — | — | 32.71 |
-| Mean of V*, HRBench-4K, HRBench-8K and MME-RealWorld-Lite | — | — | 62.87 |
+| Benchmark and metric | LVR ours | LVR paper | HyLaR ours | HyLaR paper | LUT ours | LUT paper |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| V* overall | 81.68 | 78.5 | 81.68 | 76.44 | 82.20 | 76.44 |
+| V* Direct Attributes | 84.35 | 81.7 | 84.35 | 77.39 | 85.22 | 77.39 |
+| V* Relative Position | 77.63 | 73.7 | 77.63 | 75.00 | 77.63 | 75.00 |
+| MMVP question accuracy | 75.00 | 66.7 | 75.00 | 65.67 | — | — |
+| BLINK overall | — | — | 55.97 | 53.60 | 55.31 | 53.60 |
+| BLINK Counting | 68.33 | 66.7 | 69.17 | — | 68.33 | — |
+| BLINK IQ-Test | 26.67 | 26.0 | 26.67 | — | 24.67 | — |
+| BLINK Jigsaw | 68.00 | 52.0 | 69.33 | — | 60.67 | — |
+| BLINK Relative Reflectance | 34.33 | 38.8 | 34.33 | — | 34.33 | — |
+| BLINK Spatial Relation | 89.51 | 87.4 | 88.81 | — | 88.81 | — |
+| HRBench-4K overall | — | — | 71.50 | 68.00 | 71.38 | 67.00 |
+| HRBench-4K single | — | — | 89.00 | 80.25 | 89.25 | 83.50 |
+| HRBench-4K cross | — | — | 54.00 | 55.75 | 53.50 | 50.50 |
+| HRBench-8K overall | — | — | 68.50 | 63.75 | 68.88 | 64.38 |
+| HRBench-8K single | — | — | 83.00 | 73.75 | 83.25 | 76.50 |
+| HRBench-8K cross | — | — | 54.00 | 53.75 | 54.50 | 52.25 |
+| MMStar | — | — | 62.60 | 59.70 | 61.93 | 59.70 |
+| SEED-Bench-2-Plus | — | — | 70.88 | 65.31 | — | — |
+| HallusionBench answer accuracy | — | — | 68.45 | 56.57 | — | — |
+| MME-RealWorld-Lite overall | — | — | — | — | 45.39 | 43.67 |
+| MME-RealWorld-Lite reasoning | — | — | — | — | 38.13 | 36.00 |
+| MME-RealWorld-Lite perception | — | — | — | — | 50.04 | 48.59 |
+| VisualPuzzles | — | — | — | — | 32.96 | 32.71 |
+| Mean of V*, HRBench-4K, HRBench-8K and MME-RealWorld-Lite | — | — | — | — | 66.96 | 62.87 |
+| BLINK Art Style | — | — | 67.52 | — | 66.67 | — |
+| BLINK Forensic Detection | — | — | 45.45 | — | 45.45 | — |
+| BLINK Functional Correspondence | — | — | 26.92 | — | 26.15 | — |
+| BLINK Multi View Reasoning | — | — | 53.38 | — | 53.38 | — |
+| BLINK Object Localization | — | — | 49.18 | — | 50.82 | — |
+| BLINK Relative Depth | — | — | 75.81 | — | 77.42 | — |
+| BLINK Semantic Correspondence | — | — | 33.09 | — | 33.81 | — |
+| BLINK Visual Correspondence | — | — | 53.49 | — | 53.49 | — |
+| BLINK Visual Similarity | — | — | 90.37 | — | 90.37 | — |
+| HRBench-4K mean output tokens | — | — | 2.02 | — | 2.02 | — |
+| HRBench-8K mean output tokens | — | — | 2.02 | — | 2.02 | — |
+| HallusionBench figure-group accuracy | — | — | 37.86 | — | — | — |
+| HallusionBench question-group accuracy | — | — | 41.76 | — | — | — |
+| MME-RealWorld-Lite mean output tokens | — | — | — | — | 2.00 | — |
+| MMStar · coarse perception | — | — | 70.80 | — | 70.40 | — |
+| MMStar · fine-grained perception | — | — | 54.80 | — | 54.40 | — |
+| MMStar · instance reasoning | — | — | 72.00 | — | 70.40 | — |
+| MMStar · logical reasoning | — | — | 65.20 | — | 64.80 | — |
+| MMStar · math | — | — | 66.80 | — | 67.60 | — |
+| MMStar · science & technology | — | — | 46.00 | — | 44.00 | — |
+| MMVP pair accuracy | 51.33 | — | 51.33 | — | — | — |
+| SEED-Bench-2-Plus · Chart | — | — | 68.77 | — | — | — |
+| SEED-Bench-2-Plus · Map | — | — | 61.96 | — | — | — |
+| SEED-Bench-2-Plus · Web | — | — | 84.39 | — | — | — |
+| V* mean output tokens | 2.63 | — | 2.63 | — | 2.63 | — |
+
+On V*, our 7B LVR run scores 81.68% against 78.5% in the paper. BLINK Jigsaw shows a larger difference (68.00% versus 52.0%). For LUT, the mean across the four perception benchmarks is 66.96% against 62.87%. The 7B papers label their MMVP column simply MMVP. Both local scoring conventions are shown. LUT cites public reports as the source of its Qwen baseline. [LUT, Section 4.1](https://arxiv.org/html/2608.00743v1#S4.SS1)
+
+### Inference throughput
+
+Measured on one A100 80 GB. Seconds include the SGLang generation calls measured by lmms-eval. Image sizes and output lengths vary by suite.
+
+| Suite | Model size | Batch size | Requests | Output tokens | Seconds | Output tokens/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| LVR | 3B | 16 | 982 | 2480 | 162.52 | 15.26 |
+| HyLaR | 3B | 16 | 5868 | 13186 | 2344.72 | 5.62 |
+| LVR | 7B | 16 | 1379 | 3456 | 337.03 | 10.25 |
+| HyLaR | 7B | 16 | 8911 | 72734 | 6451.81 | 11.27 |
+| LUT | 7B | 8 | 8279 | 19164 | 8591.15 | 2.23 |
 
 ## Baseline evaluation
 
