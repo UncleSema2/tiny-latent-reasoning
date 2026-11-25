@@ -5,9 +5,9 @@ tasks_3b = ["vstar_bench", "tlr_vstar_direct_attributes", "tlr_vstar_relative_po
 
 [hylar]
 paper = "https://arxiv.org/html/2604.20328v2"
-tasks_7b = ["vstar_bench", "tlr_vstar_direct_attributes", "tlr_vstar_relative_position", "hrbench4k", "hrbench8k", "mmvp", "mmstar", "seedbench_2_plus", "blink", "hallusion_bench_image"]
-tasks_3b = ["vstar_bench", "hrbench4k", "hrbench8k", "mmvp", "mmstar", "seedbench_2_plus"]
+tasks_7b = ["vstar_bench", "tlr_vstar_direct_attributes", "tlr_vstar_relative_position", "tlr_hrbench4k_local", "tlr_hrbench8k_local", "mmvp", "mmstar", "seedbench_2_plus", "blink", "tlr_hallusion_image_local"]
+tasks_3b = ["vstar_bench", "tlr_hrbench4k_local", "tlr_hrbench8k_local", "mmvp", "mmstar", "seedbench_2_plus"]
 
 [lut]
 paper = "https://arxiv.org/html/2608.00743v1"
-tasks_7b = ["vstar_bench", "hrbench4k", "hrbench8k", "mmerealworld_lite", "mmstar", "blink", "visualpuzzles_full"]
+tasks_7b = ["vstar_bench", "tlr_hrbench4k_local", "tlr_hrbench8k_local", "mmerealworld_lite", "mmstar", "blink", "visualpuzzles_full"]

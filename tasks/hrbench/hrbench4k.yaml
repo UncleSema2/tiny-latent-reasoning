@@ -1,0 +1,3 @@
+include: ../../vendor/lmms-eval/lmms_eval/tasks/hrbench/hrbench4k.yaml
+task: tlr_hrbench4k_local
+process_results: !function score.process_results
