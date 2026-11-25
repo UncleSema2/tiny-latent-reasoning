@@ -156,3 +156,32 @@ uv run --frozen --extra eval scripts/baseline.py lvr --lvr-steps 8 --batch-size 
 ```
 
 Choose 4, 8 or 16 steps. The first decode of the start marker uses its token embedding. Each subsequent latent step takes the previous normalized hidden state as its input. The budget is tracked separately for each request. Evaluation uses greedy decoding with a 512-token limit and the same image limits, prompts and scoring as the local baseline. [Reference decoder](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/src/model/qwen_lvr_model.py) · [Checkpoint revision](https://huggingface.co/vincentleebang/LVR-7B/tree/413c55c908c152f47538320615178cddcf73201a)
+
+### LVR-7B results
+
+The local columns use the same pinned suite and processor limits as the 7B base model. The paper columns use the corresponding fixed-step budgets. The local MMVP question and pair metrics use the four corrected labels documented above. [LVR, Table 1](https://arxiv.org/html/2509.24251v2#S4.T1)
+
+| Metric (%) | Local base | Local 4 | Paper 4 | Local 8 | Paper 8 | Local 16 | Paper 16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| V* overall | 81.68 | 79.06 | 81.2 | 81.15 | 81.7 | 79.58 | 80.6 |
+| V* Direct Attributes | 84.35 | 83.48 | 84.4 | 83.48 | 84.4 | 82.61 | 81.7 |
+| V* Relative Position | 77.63 | 71.05 | 76.3 | 76.32 | 77.6 | 73.68 | 79.0 |
+| MMVP questions | 75.00 | 74.00 | 72.0 | 73.33 | 71.7 | 73.67 | 71.7 |
+| MMVP pairs | 51.33 | 48.67 | — | 48.00 | — | 49.33 | — |
+| BLINK Counting | 68.33 | 66.67 | 69.2 | 66.67 | 70.0 | 68.33 | 70.8 |
+| BLINK IQ-Test | 26.67 | 26.67 | 28.7 | 27.33 | 29.3 | 26.67 | 27.3 |
+| BLINK Jigsaw | 68.00 | 52.00 | 52.7 | 56.00 | 52.0 | 58.67 | 52.7 |
+| BLINK Relative Reflectance | 34.33 | 29.85 | 42.5 | 31.34 | 42.5 | 34.33 | 41.8 |
+| BLINK Spatial Relation | 89.51 | 88.11 | 89.5 | 88.11 | 86.0 | 90.91 | 87.4 |
+
+### LVR-7B throughput
+
+One A100 80 GB, eight latent steps, the first 64 V* high-resolution questions in original order. Each sweep uses the same warmed engine, identical prompt and image paths, and a fixed memory fraction of 0.55. GPU measurements cover batched generation, including image preprocessing. Peak memory is device memory reported by the driver.
+
+| Concurrent requests | Questions/s | Mean GPU utilization (%) | Peak GPU memory (GiB) |
+| ---: | ---: | ---: | ---: |
+| 16 | 1.46 | 92.9 | 46.86 |
+| 32 | 1.47 | 96.6 | 47.10 |
+| 64 | 1.50 | 94.8 | 47.12 |
+
+On the first two V* questions, single-request and batched generation both entered one latent span, emitted eight latent placeholders and returned the reference choices A and C. During latent steps the engine masks end-of-sequence tokens to keep the request alive. The reference can emit such a token inside the span. Across all 64 questions, the final answer matched the saved reference on 57, 58 and 58 questions at concurrency 16, 32 and 64, respectively. This comparison measures end-to-end agreement across inference stacks.
