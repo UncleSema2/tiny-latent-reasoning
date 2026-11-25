@@ -62,7 +62,11 @@ def main():
         )
     if not (checkpoint / "config.json").is_file():
         parser.error("--checkpoint must point to a downloaded model snapshot")
-    model_args = f"model={checkpoint.resolve()}"
+    # Keep memory available for the vision encoder and high-resolution image resizing.
+    model_args = (
+        f"model={checkpoint.resolve()},gpu_memory_utilization=0.55,"
+        f"max_running_requests={args.batch_size},mm_processor_worker_num=1"
+    )
     if args.paper in {"lvr", "hylar"}:
         max_tokens = 5120 if args.paper == "lvr" else 16384
         image_size = {"shortest_edge": 128 * 28**2, "longest_edge": max_tokens * 28**2}
