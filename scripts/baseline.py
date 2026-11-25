@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -36,6 +37,12 @@ def main():
     parser.add_argument(
         "--checkpoint", type=Path, help="Override the pinned Qwen snapshot"
     )
+    parser.add_argument(
+        "--lvr-steps",
+        type=int,
+        choices=(4, 8, 16),
+        help="Evaluate the released LVR-7B checkpoint with fixed-step decoding",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--limit", type=int)
@@ -45,6 +52,8 @@ def main():
         parser.error(f"No published {args.size} suite for {args.paper}")
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("batch size and limit must be positive")
+    if args.lvr_steps and (args.paper, args.size) != ("lvr", "7b"):
+        parser.error("--lvr-steps requires the 7B LVR suite")
     checkpoint = args.checkpoint
     if checkpoint is None:
         from huggingface_hub import snapshot_download
@@ -53,9 +62,13 @@ def main():
             "3b": "66285546d2b821cf421d4f5eb2576359d3770cd3",
             "7b": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
         }[args.size]
+        repo = f"Qwen/Qwen2.5-VL-{args.size.upper()}-Instruct"
+        if args.lvr_steps:
+            repo = "vincentleebang/LVR-7B"
+            revision = "413c55c908c152f47538320615178cddcf73201a"
         checkpoint = Path(
             snapshot_download(
-                f"Qwen/Qwen2.5-VL-{args.size.upper()}-Instruct",
+                repo,
                 revision=revision,
                 allow_patterns=["*.safetensors", "*.json", "*.txt", "*.jinja"],
             )
@@ -67,6 +80,26 @@ def main():
         f"model={checkpoint.resolve()},gpu_memory_utilization=0.55,"
         f"max_running_requests={args.batch_size},mm_processor_worker_num=1"
     )
+    run_kwargs = {}
+    if args.lvr_steps:
+        config = json.loads((checkpoint / "config.json").read_text())
+        if config["architectures"] != ["QwenWithLVR"]:
+            parser.error("--lvr-steps requires an LVR checkpoint")
+        override = {
+            "architectures": ["Qwen2_5_VLForConditionalGeneration"],
+            "lvr_steps": args.lvr_steps,
+        }
+        model_args += ",json_model_override_args=" + json.dumps(
+            override, separators=(",", ":")
+        )
+        model_args += ",disable_radix_cache=True"
+        run_kwargs["env"] = {
+            **os.environ,
+            "SGLANG_EXTERNAL_MODEL_PACKAGE": "methods.lvr",
+            "PYTHONPATH": os.pathsep.join(
+                filter(None, (str(ROOT), os.environ.get("PYTHONPATH")))
+            ),
+        }
     if args.paper in {"lvr", "hylar"}:
         max_tokens = 5120 if args.paper == "lvr" else 16384
         image_size = {"shortest_edge": 128 * 28**2, "longest_edge": max_tokens * 28**2}
@@ -89,11 +122,13 @@ def main():
         "--output_path",
         str(args.output.resolve()),
     ]
+    if args.lvr_steps:
+        command.extend(["--gen_kwargs", "max_new_tokens=512,temperature=0"])
     if args.limit is not None:
         command.extend(["--limit", str(args.limit)])
     with TemporaryDirectory() as directory:
         write_task_configs(Path(directory), tasks)
-        subprocess.run([*command, "--tasks", directory], check=True)
+        subprocess.run([*command, "--tasks", directory], check=True, **run_kwargs)
 
 
 if __name__ == "__main__":

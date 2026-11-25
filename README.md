@@ -146,3 +146,13 @@ Choose `lvr`, `hylar`, or `lut` and a model size from the coverage table. The ru
 Install pre-commit and run `pre-commit install` before contributing.
 
 Run the registry and scoring regression checks with `uv run --frozen --extra eval python -m unittest discover -s tests`.
+
+## Released LVR checkpoint
+
+Evaluate the published 7B weights on the LVR suite with fixed-step decoding:
+
+```sh
+uv run --frozen --extra eval scripts/baseline.py lvr --lvr-steps 8 --batch-size 16 --output results/lvr-7b-8
+```
+
+Choose 4, 8 or 16 steps. The first decode of the start marker uses its token embedding. Each subsequent latent step takes the previous normalized hidden state as its input. The budget is tracked separately for each request. Evaluation uses greedy decoding with a 512-token limit and the same image limits, prompts and scoring as the local baseline. [Reference decoder](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/src/model/qwen_lvr_model.py) · [Checkpoint revision](https://huggingface.co/vincentleebang/LVR-7B/tree/413c55c908c152f47538320615178cddcf73201a)
