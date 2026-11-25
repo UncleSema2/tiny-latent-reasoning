@@ -25,6 +25,13 @@ class Qwen2_5_VLForConditionalGeneration(QwenVL):
             )
 
         if not forward_batch.forward_mode.is_decode():
+            # Re-prefilling generated IDs after KV eviction would lose the
+            # continuous inputs, which cannot be reconstructed from those IDs.
+            if (input_ids == self.config.lvr_start_id).any():
+                raise ValueError(
+                    "LVR cannot replay a latent span during prefill. "
+                    "Retry the evaluation with a smaller batch size."
+                )
             self.remaining[slots] = 0
             return super().forward(input_ids, positions, forward_batch, **kwargs)
 
