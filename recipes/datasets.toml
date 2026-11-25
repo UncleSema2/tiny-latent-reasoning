@@ -1,0 +1,35 @@
+["lmms-lab-encoder/vstar-bench"]
+revision = "b44023b4dca749ed8a76b85eb576627d05a1c174"
+tasks = ["vstar_bench", "tlr_vstar_direct_attributes", "tlr_vstar_relative_position"]
+
+["BLINK-Benchmark/BLINK"]
+revision = "a3666eb249237ba3d5eca8db21176cc47967e040"
+tasks = ["blink", "blink_counting", "blink_iq_test", "blink_jigsaw", "blink_relative_reflectance", "blink_spatial_relation"]
+
+["lmms-lab-eval/MMVP"]
+revision = "09a45a5d2dcbf69a1e4c16100462bdbc16c48327"
+tasks = ["mmvp"]
+
+["DreamMr/HR-Bench"]
+revision = "83b9013d6293b85dc507e87199ca52517536939c"
+tasks = ["tlr_hrbench4k_local", "tlr_hrbench8k_local"]
+
+["Lin-Chen/MMStar"]
+revision = "bc98d668301da7b14f648724866e57302778ab27"
+tasks = ["mmstar"]
+
+["doolayer/SEED-Bench-2-Plus"]
+revision = "6bb3b4aa945669d3dc69dbb87fb244835ec979ff"
+tasks = ["seedbench_2_plus"]
+
+["lmms-lab-encoder/HallusionBench"]
+revision = "cd417161857aefb23d878d42cf1bb53aa9dd646f"
+tasks = ["tlr_hallusion_image_local"]
+
+["yifanzhang114/MME-RealWorld-lite-lmms-eval"]
+revision = "f6b0dc81ba4d3c39bd9b4e544578198d365ac084"
+tasks = ["mmerealworld_lite"]
+
+["neulab/VisualPuzzles"]
+revision = "e6bc28fb1adcd27f25476b917e8c35c67b64027b"
+tasks = ["visualpuzzles_full"]

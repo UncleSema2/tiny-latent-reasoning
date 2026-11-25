@@ -1,0 +1,12 @@
+include: ../../vendor/lmms-eval/lmms_eval/tasks/hallusion_bench/hallusion_bench_image.yaml
+task: tlr_hallusion_image_local
+metric_list:
+  - metric: aAcc
+    aggregation: !function lmms_eval.tasks.hallusion_bench.evaluate_hb.hb_aggregation_result_aAcc_intern
+    higher_is_better: true
+  - metric: qAcc
+    aggregation: !function lmms_eval.tasks.hallusion_bench.evaluate_hb.hb_aggregation_result_qAcc_intern
+    higher_is_better: true
+  - metric: fAcc
+    aggregation: !function lmms_eval.tasks.hallusion_bench.evaluate_hb.hb_aggregation_result_fAcc_intern
+    higher_is_better: true

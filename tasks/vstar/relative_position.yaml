@@ -1,0 +1,4 @@
+include: ../../vendor/lmms-eval/lmms_eval/tasks/vstar_bench/vstar_bench_relative_position.yaml
+task: tlr_vstar_relative_position
+dataset_kwargs: {}
+process_docs: !function subsets.relative_position

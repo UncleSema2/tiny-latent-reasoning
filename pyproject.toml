@@ -1,0 +1,18 @@
+[project]
+name = "tiny-latent-reasoning"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.optional-dependencies]
+# The pinned harness imports filelock._api, which changed in filelock 4.
+eval = ["lmms-eval", "sglang", "filelock>=3.29.4,<4"]
+
+[tool.uv.sources]
+lmms-eval = { path = "vendor/lmms-eval" }
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.ruff]
+extend-exclude = ["vendor"]

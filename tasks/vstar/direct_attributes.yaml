@@ -1,0 +1,4 @@
+include: ../../vendor/lmms-eval/lmms_eval/tasks/vstar_bench/vstar_bench_direct_attributes.yaml
+task: tlr_vstar_direct_attributes
+dataset_kwargs: {}
+process_docs: !function subsets.direct_attributes
