@@ -10,27 +10,43 @@ Reproductions of latent visual reasoning methods. The first milestone is checkpo
 
 ## Benchmark results
 
+Scores are percentages except for mean output tokens. Every local column comes from a complete run of the base Qwen2.5-VL-Instruct checkpoint on the named suite. A dash marks an unmeasured or unpublished entry. V* overall includes both subsets. Each MMVP pair contains two questions.
+
 ### Qwen2.5-VL-3B-Instruct
 
-Full evaluation of the base checkpoint on the LVR 3B suite. Scores are percentages. The last column subtracts the published Qwen2.5-VL-3B score from our score in percentage points. A dash denotes an unavailable value. HyLaR reports a single MMVP score. Its released judging code aggregates per-question decisions. [HyLaR, Table 4](https://arxiv.org/html/2604.20328v2#S4.T4)
+HyLaR Table 4 reports six base-model scores. Differences below subtract the published value from our HyLaR-suite score in percentage points. We compare MMVP question accuracy with the paper's MMVP column because the released judge scores individual questions. See Evaluation protocols for differences in image processing, prompts and scoring. [HyLaR, Table 4](https://arxiv.org/html/2604.20328v2#S4.T4)
 
-| Benchmark and metric | Evaluated | Ours (%) | HyLaR paper, base 3B (%) | Difference (pp) |
-| --- | ---: | ---: | ---: | ---: |
-| V* overall | 191 | **75.39** | 70.68 | +4.71 |
-| V* Direct Attributes | 115 | **84.35** | — | — |
-| V* Relative Position | 76 | **61.84** | — | — |
-| MMVP question accuracy | 300 | **64.00** | 62.00 | +2.00 |
-| MMVP pair accuracy | 150 pairs | **34.00** | — | — |
-| BLINK IQ-Test | 150 | **26.67** | — | — |
-| BLINK Jigsaw | 150 | **38.67** | — | — |
-| HRBench-4K overall | — | — | 61.75 | — |
-| HRBench-8K overall | — | — | 60.25 | — |
-| MMStar | — | — | 52.40 | — |
-| SEED-Bench-2-Plus | — | — | 58.82 | — |
+| Benchmark and metric | Examples or pairs | LVR suite (ours) | HyLaR suite (ours) | HyLaR paper | HyLaR Δ (pp) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| V* overall | 191 | 75.39 | 76.44 | 70.68 | +5.76 |
+| V* Direct Attributes | 115 | 84.35 | — | — | — |
+| V* Relative Position | 76 | 61.84 | — | — | — |
+| MMVP question accuracy | 300 | 64.00 | 65.00 | 62.00 | +3.00 |
+| MMVP pair accuracy | 150 | 34.00 | 34.67 | — | — |
+| BLINK IQ-Test | 150 | 26.67 | — | — | — |
+| BLINK Jigsaw | 150 | 38.67 | — | — | — |
+| HRBench-4K overall | 800 | — | 67.00 | 61.75 | +5.25 |
+| HRBench-8K overall | 800 | — | 63.50 | 60.25 | +3.25 |
+| MMStar | 1500 | — | 55.60 | 52.40 | +3.20 |
+| SEED-Bench-2-Plus | 2277 | — | 67.90 | 58.82 | +9.08 |
+| HRBench-4K cross | 400 | — | 49.75 | — | — |
+| HRBench-4K mean output tokens | 800 | — | 2.24 | — | — |
+| HRBench-4K single | 400 | — | 84.25 | — | — |
+| HRBench-8K cross | 400 | — | 46.50 | — | — |
+| HRBench-8K mean output tokens | 800 | — | 2.18 | — | — |
+| HRBench-8K single | 400 | — | 80.50 | — | — |
+| MMStar · coarse perception | 250 | — | 68.80 | — | — |
+| MMStar · fine-grained perception | 250 | — | 48.40 | — | — |
+| MMStar · instance reasoning | 250 | — | 61.20 | — | — |
+| MMStar · logical reasoning | 250 | — | 55.20 | — | — |
+| MMStar · math | 250 | — | 60.40 | — | — |
+| MMStar · science & technology | 250 | — | 39.60 | — | — |
+| SEED-Bench-2-Plus · Chart | 810 | — | 64.32 | — | — |
+| SEED-Bench-2-Plus · Map | 807 | — | 59.23 | — | — |
+| SEED-Bench-2-Plus · Web | 660 | — | 82.88 | — | — |
+| V* mean output tokens | 191 | 2.58 | 2.57 | — | — |
 
-The two V* subsets partition the 191 overall questions. Our run used batch size 16 and the LVR image budget of 128–5,120 visual tokens. The checkpoint revision was `66285546d2b821cf421d4f5eb2576359d3770cd3` and the lmms-eval revision was `9134731f4f617e62ee80bcae9d0d5d9695ea55ef`. The harness recorded 2,480 generated tokens in 162.52 seconds (15.26 tokens/s). The cause of the difference from HyLaR remains unverified. [Qwen checkpoint](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/tree/66285546d2b821cf421d4f5eb2576359d3770cd3)
-
-LVR Table 2 reports trained 3B variants at 4, 8 and 16 latent steps and omits the base Qwen row. For example, its 67.0 on V* and 58.0 on MMVP are scores for LVR after RL at 8 and 16 steps respectively. LUT evaluates 7B models. [LVR, Tables 1–2](https://arxiv.org/html/2509.24251v2#S4.T2) · [LUT, Section 4](https://arxiv.org/html/2608.00743v1#S4)
+The LVR paper reports trained 3B models at 4, 8 and 16 latent steps. For example, its 67.0 on V* and 58.0 on MMVP are scores after RL at 8 and 16 steps respectively. LUT evaluates 7B models. [LVR, Table 2](https://arxiv.org/html/2509.24251v2#S4.T2) · [LUT, Section 4](https://arxiv.org/html/2608.00743v1#S4)
 
 ### Published Qwen2.5-VL-7B baselines
 
