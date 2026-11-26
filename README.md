@@ -204,4 +204,4 @@ For a one-GPU overfit check, train a fixed four-example subset:
 uv run --frozen --extra train -m methods.lvr.training --data data/lvr --output runs/lvr-3b-overfit --overfit 4 --batch-size 4 --accumulation 1 --steps 24
 ```
 
-On one A100 80 GB, text cross-entropy fell from 12.44 to 0.00084 and region MSE from 7.28 to 6.08 over 24 updates. The collator matched the Qwen processor's prompt IDs and image grids for all four examples. The pilot measures teacher-forced learning on that subset.
+The collator matched the Qwen processor prompt tokens and image grids for all four examples.

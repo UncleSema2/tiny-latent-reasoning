@@ -19,6 +19,10 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from transformers.conversion_mapping import (
+    get_checkpoint_conversion_mapping,
+    register_checkpoint_conversion_mapping,
+)
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 from .data import ANNOTATIONS, IMAGE_REVISION, load_rows, prepare_images
@@ -213,6 +217,23 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         return {"loss": ce + 0.1 * mse, "ce": ce.detach(), "mse": mse.detach()}
 
 
+# LVR changes the forward pass only. Use Qwen's checkpoint key conversions.
+register_checkpoint_conversion_mapping(
+    QwenWithLVR.__name__,
+    get_checkpoint_conversion_mapping(Qwen2_5_VLForConditionalGeneration.__name__),
+)
+
+
+def load_base(model_class, source, **kwargs):
+    model, info = model_class.from_pretrained(
+        source, output_loading_info=True, **kwargs
+    )
+    problems = {key: value for key, value in info.items() if value}
+    if problems:
+        raise ValueError(f"Incomplete base checkpoint {source}: {problems}")
+    return model
+
+
 class LVRTrainer(Trainer):
     def compute_loss(
         self, model, inputs, return_outputs=False, num_items_in_batch=None
@@ -278,7 +299,8 @@ def main():
     model_class = (
         Qwen2_5_VLForConditionalGeneration if args.answer_only else QwenWithLVR
     )
-    model = model_class.from_pretrained(
+    model = load_base(
+        model_class,
         source,
         revision=REVISIONS[args.size],
         dtype=torch.float32,
