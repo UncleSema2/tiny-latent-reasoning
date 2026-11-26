@@ -15,6 +15,18 @@ The base checkpoints already have full-suite measurements. Use those predictions
 4. Distill into a fresh base student with all-layer cosine alignment and answer cross-entropy. Compare with vanilla SFT and shuffled-order distillation. Then add LAPO on the 15K ZwZ-RL-VQA and 9K ViRL mixture. Verify the attribution gates and the sign of latent advantages on a small rollout.
 5. Report all four inference budgets (8, 10, 12, 16) and the paper's best-per-benchmark aggregate. The four-suite mean in Table 1 is 68.45 for LUT-SFT and 69.96 after LAPO. Keep MMStar, BLINK and VisualPuzzles as secondary evaluations. [LUT, §§3–4](https://arxiv.org/html/2608.00743v1#S3)
 
+### Prepare the Visual-CoT sample
+
+Point `--images` at the extracted `cot_image_data` directory from the pinned Visual-CoT release. An existing copy with the same subset directories also works. On a fresh machine, download the release's `cot_images_tar_split/cot_images_*` parts and extract their concatenated tar archive in filename order. [Pinned data and image archive](https://huggingface.co/datasets/deepcs233/Visual-CoT/tree/223d2d8c1146fda2bb918801b8276c587b78b61c)
+
+```sh
+uv run --frozen -m methods.lut.prepare --images data/cot_image_data --output data/lut/train.jsonl
+```
+
+The command downloads and verifies `viscot_363k.json`. Pass `--annotations PATH` to use a local copy. The file contains 404,120 training dialogues. Each output row points to the original image and carries the question and final answer, the subset, the source question ID and a unique ID derived from the source row index. The conversion strips the grounding request and skips the intermediate box and cropped view.
+
+Our default draw samples 60,000 rows without replacement with seed 42. It covers ten subsets and 50,082 distinct image paths. The output SHA-256 is `cfb3eff3d84f80b1dbb089eeaec6e087e983338cbea71e3cf17f02b4bb0e90a9`. The command checks each path and prints the counts and checksum. Use this same JSONL for the LUT teacher and the vanilla SFT control. The LUT paper describes a random draw and does not specify its IDs. [LUT training data](https://arxiv.org/html/2608.00743v1#S4.SS1)
+
 ### Build the LUT curriculum
 
 The implemented CPU stage takes frozen-judge scores. Each JSONL row carries a globally unique sample ID, a source subset and two lists of natural log probabilities for the same ordered answer tokens. The scorer must exclude prompt tokens, padding and latent positions from both lists.
