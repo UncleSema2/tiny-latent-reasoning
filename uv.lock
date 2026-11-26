@@ -3170,14 +3170,30 @@ eval = [
     { name = "lmms-eval" },
     { name = "sglang" },
 ]
+train = [
+    { name = "accelerate" },
+    { name = "filelock" },
+    { name = "huggingface-hub" },
+    { name = "pillow" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "transformers" },
+]
 
 [package.metadata]
 requires-dist = [
+    { name = "accelerate", marker = "extra == 'train'" },
     { name = "filelock", marker = "extra == 'eval'", specifier = ">=3.29.4,<4" },
+    { name = "filelock", marker = "extra == 'train'" },
+    { name = "huggingface-hub", marker = "extra == 'train'" },
     { name = "lmms-eval", marker = "extra == 'eval'", directory = "vendor/lmms-eval" },
+    { name = "pillow", marker = "extra == 'train'" },
     { name = "sglang", marker = "extra == 'eval'" },
+    { name = "torch", marker = "extra == 'train'" },
+    { name = "torchvision", marker = "extra == 'train'" },
+    { name = "transformers", marker = "extra == 'train'" },
 ]
-provides-extras = ["eval"]
+provides-extras = ["eval", "train"]
 
 [[package]]
 name = "tml-renderers"

@@ -185,3 +185,23 @@ One A100 80 GB, eight latent steps, the first 64 V* high-resolution questions in
 | 64 | 1.50 | 94.8 | 47.12 |
 
 On the first two V* questions, single-request and batched generation both entered one latent span, emitted eight latent placeholders and returned the reference choices A and C. During latent steps the engine masks end-of-sequence tokens to keep the request alive. The reference can emit such a token inside the span. Across all 64 questions, the final answer matched the saved reference on 57, 58 and 58 questions at concurrency 16, 32 and 64, respectively. This comparison measures end-to-end agreement across inference stacks.
+
+## Training LVR with Visual CoT
+
+Run the 3B SFT stage and evaluate the resulting checkpoint at 4, 8 and 16 latent steps with one command:
+
+```sh
+uv run --frozen --extra train --extra eval scripts/lvr_sft.py --size 3b --gpus 8 --data data/lvr --output runs/lvr-3b-sft
+```
+
+Use `--size 7b` for the 7B recipe and `--answer-only` for the ordinary SFT control on the same examples. Multiple GPUs on one node use FSDP2. Each rank processes eight adaptive microbatches per optimizer update. Short examples share a padded batch of up to four examples. Sequences of at least 4,096 tokens run individually. The recipe uses 2,500 updates, a frozen vision tower and merger, a peak learning rate of 1e-5, and a cosine schedule. The LVR objective adds 0.1 times the mean squared error on the selected visual embeddings to answer and boundary-token cross-entropy.
+
+The first run fetches the authors' two annotation files and the pinned Visual CoT image archives. Set `HF_HOME` on storage with room for approximately 130 GiB of archive parts plus the extracted images, model weights and optimizer checkpoints. Existing annotations in `lvr_data/` under the data directory are checked by SHA-256. Existing images are read from `images/viscot/`. The release contains 417,453 single-image training records. [Author annotations](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/README.md#dataset-preparation) · [Visual CoT image revision](https://huggingface.co/datasets/deepcs233/Visual-CoT/tree/223d2d8c1146fda2bb918801b8276c587b78b61c)
+
+For a one-GPU overfit check, train a fixed four-example subset:
+
+```sh
+uv run --frozen --extra train -m methods.lvr.training --data data/lvr --output runs/lvr-3b-overfit --overfit 4 --batch-size 4 --accumulation 1 --steps 24
+```
+
+On one A100 80 GB, text cross-entropy fell from 12.44 to 0.00084 and region MSE from 7.28 to 6.08 over 24 updates. The collator matched the Qwen processor's prompt IDs and image grids for all four examples. The pilot measures teacher-forced learning on that subset.

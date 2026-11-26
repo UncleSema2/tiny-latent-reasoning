@@ -52,8 +52,10 @@ def main():
         parser.error(f"No published {args.size} suite for {args.paper}")
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("batch size and limit must be positive")
-    if args.lvr_steps and (args.paper, args.size) != ("lvr", "7b"):
-        parser.error("--lvr-steps requires the 7B LVR suite")
+    if args.lvr_steps and (
+        args.paper != "lvr" or (args.size == "3b" and not args.checkpoint)
+    ):
+        parser.error("--lvr-steps requires the LVR suite and a local checkpoint for 3B")
     checkpoint = args.checkpoint
     if checkpoint is None:
         from huggingface_hub import snapshot_download
@@ -81,8 +83,10 @@ def main():
         f"max_running_requests={args.batch_size},mm_processor_worker_num=1"
     )
     run_kwargs = {}
+    config = json.loads((checkpoint / "config.json").read_text())
+    if config.get("architectures") == ["QwenWithLVR"] and not args.lvr_steps:
+        parser.error("Specify --lvr-steps for an LVR checkpoint")
     if args.lvr_steps:
-        config = json.loads((checkpoint / "config.json").read_text())
         if config["architectures"] != ["QwenWithLVR"]:
             parser.error("--lvr-steps requires an LVR checkpoint")
         override = {
@@ -93,6 +97,9 @@ def main():
             override, separators=(",", ":")
         )
         model_args += ",disable_radix_cache=True"
+    if args.lvr_steps or (checkpoint / "sft_recipe.json").is_file():
+        # Float32 optimizer weights must use the BF16 training compute dtype.
+        model_args += ",dtype=bfloat16"
         run_kwargs["env"] = {
             **os.environ,
             "SGLANG_EXTERNAL_MODEL_PACKAGE": "methods.lvr",
