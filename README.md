@@ -10,6 +10,8 @@ Reproductions of latent visual reasoning methods. The first milestone is checkpo
 
 ## Reproduction plan
 
+See the [experiment sequence and acceptance checks](docs/reproduction-plan.md) for the next LVR, LUT and HyLaR runs.
+
 1. **Establish the baseline.** Pin checkpoints, data and the evaluation harness. Run each base model on its paper's full suite and compare the same splits and scoring conventions.
 2. **Implement each method.** Give LVR, HyLaR and LUT separate training recipes with pinned inputs, latent-step settings, seeds and checkpoint metadata. Validate each recipe on a small run before scaling training.
 3. **Evaluate trained checkpoints.** Run each method on its original suite, record accuracy and inference cost alongside the base model, and expose training and evaluation through one command per paper. Re-run the existing recipe checks when adding a method.
