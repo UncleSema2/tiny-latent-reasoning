@@ -1,4 +1,4 @@
-"""Fixed-step decoding for the released LVR-7B checkpoint."""
+"""Fixed-step decoding for headless LVR checkpoints on Qwen2.5-VL."""
 
 import torch
 from sglang.srt.model_executor.forward_context import get_req_to_token_pool
@@ -10,8 +10,22 @@ from sglang.srt.models.qwen2_5_vl import (
 class Qwen2_5_VLForConditionalGeneration(QwenVL):
     """Keep SGLang's Qwen vision processor and replace only the decoding step."""
 
+    def load_weights(self, weights):
+        # Transformers 5 nests the language and vision towers under model.
+        return super().load_weights(
+            (
+                name.replace("model.language_model.", "model.", 1).replace(
+                    "model.visual.", "visual.", 1
+                ),
+                tensor,
+            )
+            for name, tensor in weights
+        )
+
     @torch.no_grad()
     def forward(self, input_ids, positions, forward_batch, **kwargs):
+        if not getattr(self.config, "lvr_steps", None):
+            return super().forward(input_ids, positions, forward_batch, **kwargs)
         slots = forward_batch.req_pool_indices
         if not hasattr(self, "remaining"):
             if self.config.lvr_head or self.config.latent_end_token:
