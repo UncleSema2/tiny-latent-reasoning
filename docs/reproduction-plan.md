@@ -60,3 +60,5 @@ uv run --frozen --extra train torchrun --standalone --nproc-per-node=8 --module 
 ```
 
 Each rank decodes eight continuous steps using the previous final-layer state as the next input. The causal mask restricts access to image keys to image queries and the latent span. The closing boundary predicts the first answer token. Loss combines mean answer cross-entropy and the mean squared off-diagonal cosine similarity of the latent states. Pilot choices include a frozen vision encoder, a 512-token image cap, decorrelation weight 0.1, BF16 weights and 24 AdamW updates at 1e-5. The log averages both terms across ranks. [LUT teacher objective](https://arxiv.org/html/2608.00743v1#S3.SS2)
+
+On 16 A100 80 GB GPUs, the pilot completed 24 updates on the first 16 records of the default 60K sample. Mean answer cross-entropy across ranks was 15.77 on the first update and 10.27 on the last. Averaging the first and last four updates gives 14.39 and 10.51. The decorrelation term moved from 0.333 to 0.281. These measurements describe the training batch. Held-out accuracy and trajectory utility remain to be measured.
