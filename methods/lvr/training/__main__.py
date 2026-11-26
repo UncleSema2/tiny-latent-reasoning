@@ -16,6 +16,7 @@ from transformers import (
     AutoProcessor,
     Qwen2_5_VLForConditionalGeneration,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
     set_seed,
 )
@@ -24,6 +25,7 @@ from transformers.conversion_mapping import (
     register_checkpoint_conversion_mapping,
 )
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from transformers.trainer_utils import get_last_checkpoint
 
 from .data import ANNOTATIONS, IMAGE_REVISION, load_rows, prepare_images
 
@@ -234,6 +236,23 @@ def load_base(model_class, source, **kwargs):
     return model
 
 
+class StopAfterStep(TrainerCallback):
+    """Save a resumable checkpoint at an absolute optimizer step."""
+
+    def __init__(self, step):
+        self.step = step
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if state.global_step >= self.step:
+            raise ValueError(f"Checkpoint already reached --stop-after {self.step}")
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step == self.step:
+            control.should_save = True
+            control.should_training_stop = True
+        return control
+
+
 class LVRTrainer(Trainer):
     def compute_loss(
         self, model, inputs, return_outputs=False, num_items_in_batch=None
@@ -242,6 +261,29 @@ class LVRTrainer(Trainer):
         if self.args.gradient_accumulation_steps == 1 and self.args.logging_steps == 1:
             self.log({k: outputs[k].item() for k in ("ce", "mse")})
         return (outputs["loss"], outputs) if return_outputs else outputs["loss"]
+
+
+def resumed_recipe(previous, current, step):
+    """Allow FSDP resharding when an update still consumes the same global batch."""
+    previous = previous.copy()
+    history = previous.pop("parallelism_history", [])
+    fields = ("world_size", "accumulation")
+    old = {k: previous[k] for k in fields}
+    new = {k: current[k] for k in fields}
+    if previous | new != current or (
+        old != new
+        and (not current["fsdp"] or math.prod(old.values()) != math.prod(new.values()))
+    ):
+        raise ValueError(
+            "Resume requires the original training recipe and global batch size"
+        )
+    if old != new:
+        if not history:
+            history = [{"from_step": 0, **old}]
+        history = [entry for entry in history if entry["from_step"] < step]
+        if not history or any(history[-1][k] != new[k] for k in fields):
+            history.append({"from_step": step, **new})
+    return {**current, "parallelism_history": history} if history else current
 
 
 def main():
@@ -256,6 +298,11 @@ def main():
     parser.add_argument("--size", choices=REVISIONS, default="3b")
     parser.add_argument("--base", type=Path, help="Local base snapshot")
     parser.add_argument("--steps", type=int, default=2500)
+    parser.add_argument(
+        "--stop-after",
+        type=int,
+        help="Save and stop at this optimizer step using the full --steps schedule",
+    )
     parser.add_argument(
         "--overfit", type=int, help="Use a fixed subset of this many records"
     )
@@ -273,6 +320,8 @@ def main():
     )
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
+    if args.stop_after is not None and not 1 <= args.stop_after <= args.steps:
+        parser.error("--stop-after must be between 1 and --steps")
     if not args.overfit and args.batch_size != 1:
         parser.error("Full runs use one adaptive pack per GPU microbatch")
     if (
@@ -352,6 +401,7 @@ def main():
     trainer = trainer_class(
         model=model,
         args=training,
+        callbacks=[StopAfterStep(args.stop_after)] if args.stop_after else None,
         train_dataset=rows,
         processing_class=processor,
         data_collator=VisualCoTBatch(processor, args.data / "images", args.answer_only),
@@ -371,14 +421,21 @@ def main():
         "fsdp": args.fsdp,
     }
     manifest = args.output / "sft_recipe.json"
-    if args.resume and json.loads(manifest.read_text()) != recipe:
-        raise ValueError("Resume requires the original training recipe")
+    checkpoint = None
+    if args.resume:
+        checkpoint = get_last_checkpoint(str(args.output))
+        if checkpoint is None:
+            raise ValueError("No checkpoint found to resume")
+        state = json.loads((Path(checkpoint) / "trainer_state.json").read_text())
+        recipe = resumed_recipe(
+            json.loads(manifest.read_text()), recipe, state["global_step"]
+        )
     if trainer.is_world_process_zero():
         manifest.parent.mkdir(parents=True, exist_ok=True)
         temp = manifest.with_suffix(".tmp")
         temp.write_text(json.dumps(recipe, indent=2) + "\n")
         temp.replace(manifest)
-    trainer.train(resume_from_checkpoint=args.resume or None)
+    trainer.train(resume_from_checkpoint=checkpoint)
     trainer.save_model()
     trainer.save_state()
 

@@ -7,12 +7,88 @@ from unittest.mock import Mock
 import torch
 import torch.nn.functional as F
 from safetensors.torch import save_file
-from transformers import Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration
+from transformers import (
+    Qwen2_5_VLConfig,
+    Qwen2_5_VLForConditionalGeneration,
+    Trainer,
+    TrainingArguments,
+)
 
-from methods.lvr.training.__main__ import QwenWithLVR, load_base, region_indices
+from methods.lvr.training.__main__ import (
+    QwenWithLVR,
+    StopAfterStep,
+    load_base,
+    region_indices,
+    resumed_recipe,
+)
 
 
 class LVRTrainingTests(unittest.TestCase):
+    def test_fsdp_resume_preserves_global_batch_and_records_transition(self):
+        original = {"world_size": 8, "accumulation": 8, "fsdp": True, "seed": 42}
+        current = {**original, "world_size": 16, "accumulation": 4}
+        updated = resumed_recipe(original, current, 500)
+        self.assertEqual(
+            updated["parallelism_history"],
+            [
+                {"from_step": 0, "world_size": 8, "accumulation": 8},
+                {"from_step": 500, "world_size": 16, "accumulation": 4},
+            ],
+        )
+        self.assertEqual(resumed_recipe(updated, current, 500), updated)
+        for change in ({"accumulation": 8}, {"fsdp": False}, {"seed": 9}):
+            with self.assertRaisesRegex(ValueError, "original training recipe"):
+                resumed_recipe(original, current | change, 500)
+
+    def test_staged_training_matches_uninterrupted_schedule(self):
+        class Regression(torch.nn.Linear):
+            def forward(self, x, labels):
+                return {"loss": F.mse_loss(super().forward(x), labels)}
+
+        data = [
+            {"x": torch.tensor([float(i)]), "labels": torch.tensor([2.0 * i])}
+            for i in range(8)
+        ]
+
+        def make_trainer(path, stop=None):
+            torch.manual_seed(42)
+            return Trainer(
+                model=Regression(1, 1),
+                args=TrainingArguments(
+                    output_dir=str(path),
+                    use_cpu=True,
+                    max_steps=4,
+                    per_device_train_batch_size=1,
+                    learning_rate=0.01,
+                    warmup_steps=1,
+                    lr_scheduler_type="cosine",
+                    save_strategy="no",
+                    report_to="none",
+                    disable_tqdm=True,
+                ),
+                train_dataset=data,
+                callbacks=[StopAfterStep(stop)] if stop else None,
+            )
+
+        with TemporaryDirectory() as folder:
+            full = make_trainer(Path(folder) / "full")
+            full.train()
+            path = Path(folder) / "staged"
+            stage = make_trainer(path, stop=2)
+            stage.train()
+            self.assertEqual(stage.state.global_step, 2)
+            self.assertEqual(stage.state.max_steps, 4)
+            self.assertTrue((path / "checkpoint-2" / "scheduler.pt").is_file())
+            with self.assertRaisesRegex(ValueError, "already reached"):
+                make_trainer(path, stop=2).train(resume_from_checkpoint=True)
+            resumed = make_trainer(path)
+            resumed.train(resume_from_checkpoint=True)
+            self.assertEqual(resumed.state.global_step, 4)
+            for key, tensor in full.model.state_dict().items():
+                torch.testing.assert_close(
+                    tensor, resumed.model.state_dict()[key], atol=0, rtol=0
+                )
+
     def test_loads_every_tensor_from_original_qwen_layout(self):
         config = Qwen2_5_VLConfig(
             text_config={
