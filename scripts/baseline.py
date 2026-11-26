@@ -41,7 +41,7 @@ def main():
         "--lvr-steps",
         type=int,
         choices=(4, 8, 16),
-        help="Evaluate the released LVR-7B checkpoint with fixed-step decoding",
+        help="Use fixed-step decoding for an LVR checkpoint",
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=1)

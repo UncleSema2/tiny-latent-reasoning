@@ -1,4 +1,4 @@
-"""Fixed-step decoding for the released LVR-7B checkpoint."""
+"""Fixed-step decoding for headless LVR checkpoints on Qwen2.5-VL."""
 
 import torch
 from sglang.srt.model_executor.forward_context import get_req_to_token_pool

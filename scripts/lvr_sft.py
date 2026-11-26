@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--size", choices=("3b", "7b"), default="3b")
     parser.add_argument("--gpus", type=int, default=1, help="Training GPUs on one node")
     parser.add_argument("--answer-only", action="store_true")
-    parser.add_argument("--eval-batch-size", type=int, default=16)
+    parser.add_argument("--eval-batch-size", type=int, default=64)
     parser.add_argument("--eval-limit", type=int)
     args, training_options = parser.parse_known_args()
     if (

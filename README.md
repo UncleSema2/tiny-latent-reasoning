@@ -188,7 +188,7 @@ On the first two V* questions, single-request and batched generation both entere
 
 ## Training LVR with Visual CoT
 
-Run the 3B SFT stage and evaluate the resulting checkpoint at 4, 8 and 16 latent steps with one command:
+This command trains the 3B model and evaluates the resulting checkpoint at 4, 8 and 16 latent steps.
 
 ```sh
 uv run --frozen --extra train --extra eval scripts/lvr_sft.py --size 3b --gpus 8 --data data/lvr --output runs/lvr-3b-sft
@@ -198,10 +198,48 @@ Use `--size 7b` for the 7B recipe and `--answer-only` for the ordinary SFT contr
 
 The first run fetches the authors' two annotation files and the pinned Visual CoT image archives. Set `HF_HOME` on storage with room for approximately 130 GiB of archive parts plus the extracted images, model weights and optimizer checkpoints. Existing annotations in `lvr_data/` under the data directory are checked by SHA-256. Existing images are read from `images/viscot/`. The release contains 417,453 single-image training records. [Author annotations](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/README.md#dataset-preparation) · [Visual CoT image revision](https://huggingface.co/datasets/deepcs233/Visual-CoT/tree/223d2d8c1146fda2bb918801b8276c587b78b61c)
 
-For a one-GPU overfit check, train a fixed four-example subset:
+The one-GPU pilot trains on a fixed four-example subset.
 
 ```sh
 uv run --frozen --extra train -m methods.lvr.training --data data/lvr --output runs/lvr-3b-overfit --overfit 4 --batch-size 4 --accumulation 1 --steps 24
 ```
 
-The collator matched the Qwen processor prompt tokens and image grids for all four examples.
+All 824 tensors in the 3B base checkpoint and all 729 tensors in the 7B base checkpoint matched their source values before training. On one A100 80 GB, the 3B pilot took 47.6 seconds for 24 updates. Text cross-entropy fell from 5.635 to 1.372 and visual reconstruction MSE from 23.736 to 7.862 on the four training examples. The collator matched the Qwen processor prompt tokens and image grids for all four.
+
+Decode the same four questions with SGLang to inspect the generated text, count latent start markers and check the answer suffix against the annotation.
+
+```sh
+uv run --frozen --extra train --extra eval -m methods.lvr.training.check_overfit --data data/lvr --checkpoint runs/lvr-3b-overfit
+```
+
+With eight latent steps allowed, all four generated answers matched the targets after 24 updates. The LVR pilot started each response with `<|im_start|>` and generated zero latent spans. The matched answer-only control also produced all four target answers.
+
+Repeating the training command from the base checkpoint with `--steps 96` and a fresh output directory reduced text cross-entropy to 0.453 and region MSE to 5.522. All four responses began with `<|lvr_start|>`. Zero of four ended with the target answer at the eight-step decoding budget. The teacher-forced region lengths on these four records were 52, 12, 4 and 112 tokens.
+
+### Independent 3B checkpoint
+
+We also evaluated a previously trained 3B checkpoint from a local adaptation of the authors' implementation, with seed 42, 2,500 optimizer updates and 64 adaptive microbatches per update. The two local weight shards have SHA-256 prefixes `79ad32ff7de9dc8f` and `4888ff83d5aebe29`, in shard order. The full-scale accuracy of the trainer introduced here remains unmeasured. [Reference implementation](https://github.com/VincentLeebang/lvr/tree/637a9f7e17e865b1372b65f182197fbc4a5a1449) · [LVR, Table 2](https://arxiv.org/html/2509.24251v2#S4.T2)
+
+Each local column uses the pinned 3B suite and the MMVP corrections described above. This command reproduces the eight-step column with the checkpoint in `$CHECKPOINT`.
+
+```sh
+uv run --frozen --extra eval scripts/baseline.py lvr --size 3b --checkpoint "$CHECKPOINT" --lvr-steps 8 --batch-size 64 --output results/lvr-3b-8
+```
+
+| Metric (%) | Local base | Local 4 | Paper 4 | Local 8 | Paper 8 | Local 16 | Paper 16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| V* overall | 75.39 | 68.59 | 64.9 | 69.11 | 65.5 | 69.63 | 66.5 |
+| V* Direct Attributes | 84.35 | 74.78 | 69.6 | 74.78 | 71.3 | 76.52 | 71.3 |
+| V* Relative Position | 61.84 | 60.53 | 60.5 | 59.21 | 60.5 | 59.21 | 56.6 |
+| MMVP question accuracy | 64.00 | 64.67 | 54.7 | 65.33 | 56.0 | 65.00 | 56.0 |
+| MMVP pair accuracy | 34.00 | 33.33 | — | 34.67 | — | 36.00 | — |
+| BLINK IQ-Test | 26.67 | 30.00 | 29.3 | 31.33 | 30.7 | 29.33 | 30.0 |
+| BLINK Jigsaw | 38.67 | 52.67 | 52.7 | 52.67 | 52.7 | 52.67 | 52.0 |
+
+For this checkpoint, eight-step decoding on the same 64 high-resolution V* questions gave the following throughput on one A100 80 GB. We used 64 concurrent requests in the full evaluation.
+
+| Concurrent requests | Questions/s | Mean GPU utilization (%) | Peak GPU memory (GiB) |
+| ---: | ---: | ---: | ---: |
+| 16 | 1.715 | 86.4 | 42.75 |
+| 32 | 1.894 | 93.0 | 42.78 |
+| 64 | 1.913 | 95.3 | 42.78 |
