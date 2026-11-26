@@ -62,3 +62,16 @@ uv run --frozen --extra train torchrun --standalone --nproc-per-node=8 --module 
 Each rank decodes eight continuous steps using the previous final-layer state as the next input. The causal mask restricts access to image keys to image queries and the latent span. The closing boundary predicts the first answer token. Loss combines mean answer cross-entropy and the mean squared off-diagonal cosine similarity of the latent states. Pilot choices include a frozen vision encoder, a 512-token image cap, decorrelation weight 0.1, BF16 weights and 24 AdamW updates at 1e-5. The log averages both terms across ranks. [LUT teacher objective](https://arxiv.org/html/2608.00743v1#S3.SS2)
 
 On 16 A100 80 GB GPUs, the pilot completed 24 updates on the first 16 records of the default 60K sample. Mean answer cross-entropy across ranks was 15.77 on the first update and 10.27 on the last. Averaging the first and last four updates gives 14.39 and 10.51. The decorrelation term moved from 0.333 to 0.281. These measurements describe the training batch. Held-out accuracy and trajectory utility remain to be measured.
+
+### Train and validate the teacher on the full sample
+
+Pass `--full-epoch` to train once through the seeded JSONL in file order. At 16 ranks this gives 3,750 updates on 60,000 examples. Each rank consumes a different example at each update. Use the same torchrun rendezvous settings for training and validation.
+
+```sh
+uv run --frozen --extra train torchrun --standalone --nproc-per-node=8 --module methods.lut.teacher --full-epoch --data data/lut/train.jsonl --images data/cot_image_data --output runs/lut-teacher
+uv run --frozen --extra train torchrun --standalone --nproc-per-node=8 --module methods.lut.validate_teacher --teacher runs/lut-teacher --train data/lut/train.jsonl --annotations data/viscot_363k.json --images data/cot_image_data
+```
+
+Intermediate checkpoints at multiples of 1,000 updates contain the processor, weights and each rank's optimizer state. Resume into a fresh output directory with `--full-epoch --resume-from PATH`, the original data and the same number of ranks.
+
+Validation measures the teacher-specific quantities used for distillation. It selects 512 distinct Visual-CoT images absent from the training sample. The teacher predicts the reference answer through its trained visual bottleneck. A frozen base judge scores those answer tokens with either the teacher trajectory or random vectors matched to its per-step norms. The output `held-out.json` records answer cross-entropy, token accuracy, exact reference-prefix rate, utility differences and retention at the paper's threshold. Prefix matching ends at the last reference token. The report includes per-question values for paired analysis.

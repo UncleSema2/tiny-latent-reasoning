@@ -1,10 +1,12 @@
-"""Overfit the LUT teacher on one fixed distributed batch of Visual-CoT examples."""
+"""Train the LUT teacher on Visual-CoT with a fixed pilot batch or one full epoch."""
 
 import argparse
 import hashlib
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
+from math import ceil
 from pathlib import Path
 
 import torch
@@ -56,7 +58,7 @@ class Teacher(torch.nn.Module):
         self.boundaries = boundaries
         self.steps = steps
 
-    def forward(self, prompt, answer):
+    def forward(self, prompt, answer, *, return_trajectory=False):
         base = self.base
         decoder = base.model.language_model
         start, end = self.boundaries
@@ -104,10 +106,54 @@ class Teacher(torch.nn.Module):
         # The closing boundary predicts the first answer token.
         logits = base.lm_head(result.last_hidden_state[:, 1:]).float()
         ce = F.cross_entropy(logits.flatten(0, 1), answer.flatten())
-        unit = F.normalize(torch.cat(states, dim=1).float(), dim=-1)
+        trajectory = torch.cat(states, dim=1)
+        if return_trajectory:
+            return logits, trajectory
+        unit = F.normalize(trajectory.float(), dim=-1)
         gram = unit @ unit.transpose(-1, -2)
         diagonal = torch.eye(self.steps, dtype=torch.bool, device=ids.device)
         return ce, gram[:, ~diagonal].square().mean()
+
+
+def epoch_batches(rows, rank, world, completed, processor, images):
+    """Prefetch one CPU example per rank while the current update runs."""
+
+    def batches():
+        for offset in range(completed * world, len(rows), world):
+            active = min(world, len(rows) - offset)
+            # In the last partial batch all ranks join DDP, with zero loss on padding.
+            index = offset + (rank if rank < active else 0)
+            yield rows[index], world / active if rank < active else 0.0
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = None
+        for row, weight in batches():
+            future = pool.submit(prepare_example, processor, row, images, "cpu")
+            if pending is not None:
+                yield *pending[0].result(), pending[1]
+            pending = (future, weight)
+        if pending is not None:
+            yield *pending[0].result(), pending[1]
+
+
+def save_training_state(base, processor, optim, output, step, recipe, rank):
+    target = output / f"checkpoint-{step}"
+    stage = output / f".checkpoint-{step}"
+    if rank == 0:
+        stage.mkdir()
+    dist.barrier()
+    # ZeRO owns a deterministic optimizer partition on each rank.
+    torch.save(optim.optim.state_dict(), stage / f"optimizer-{rank}.pt")
+    if rank == 0:
+        base.save_pretrained(stage)
+        processor.save_pretrained(stage)
+        (stage / "training_state.json").write_text(
+            json.dumps({"step": step, "recipe": recipe})
+        )
+    dist.barrier()
+    if rank == 0:
+        stage.rename(target)
+    dist.barrier()
 
 
 def main():
@@ -116,9 +162,22 @@ def main():
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--base", default=BASE)
-    parser.add_argument("--updates", type=int, default=24)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--updates", type=int, help="updates on the fixed pilot batch (default 24)"
+    )
+    mode.add_argument(
+        "--full-epoch", action="store_true", help="consume every JSONL row once"
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        help="full-epoch checkpoint to continue in a fresh output directory",
+    )
     args = parser.parse_args()
-    if args.updates < 1:
+    if args.resume_from and not args.full_epoch:
+        parser.error("--resume-from requires --full-epoch")
+    if args.updates is not None and args.updates < 1:
         parser.error("--updates must be positive")
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
     torch.cuda.set_device(device)
@@ -126,8 +185,12 @@ def main():
     rank, world = dist.get_rank(), dist.get_world_size()
     set_seed(42)
     with args.data.open() as source:
-        rows = list(map(json.loads, islice(source, world)))
-    if len(rows) < world:
+        rows = list(
+            map(json.loads, source if args.full_epoch else islice(source, world))
+        )
+    if not rows:
+        raise ValueError("Empty training file")
+    if not args.full_epoch and len(rows) < world:
         raise ValueError("The pilot needs one example per rank")
     if rank == 0:
         args.output.mkdir(parents=True, exist_ok=False)
@@ -139,9 +202,8 @@ def main():
     }
     processor.tokenizer.add_tokens(list(BOUNDARIES), special_tokens=True)
     boundaries = processor.tokenizer.convert_tokens_to_ids(list(BOUNDARIES))
-    prompt, answer = prepare_example(processor, rows[rank], args.images, device)
     base, info = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        args.base,
+        args.resume_from or args.base,
         revision=REVISION,
         dtype=torch.bfloat16,
         device_map={"": device},
@@ -165,28 +227,48 @@ def main():
         lr=1e-5,
         fused=True,
     )
+    updates = ceil(len(rows) / world) if args.full_epoch else (args.updates or 24)
+    recipe = {
+        "base": BASE,
+        "revision": REVISION,
+        "world_size": world,
+        "updates": updates,
+        "data_sha256": hashlib.sha256(args.data.read_bytes()).hexdigest(),
+        "latent_steps": 8,
+        "decorrelation_weight": 0.1,
+        "seed": 42,
+        "learning_rate": 1e-5,
+    }
+    completed = 0
+    if args.full_epoch:
+        recipe.update(full_epoch=True, examples=len(rows), max_image_tokens=512)
+        if args.resume_from:
+            state = json.loads((args.resume_from / "training_state.json").read_text())
+            if state["recipe"] != recipe or not 0 < state["step"] < updates:
+                raise ValueError("Checkpoint does not match this training recipe")
+            completed = state["step"]
+            optim.optim.load_state_dict(
+                torch.load(
+                    args.resume_from / f"optimizer-{rank}.pt",
+                    map_location="cpu",
+                    weights_only=True,
+                )
+            )
+        batches = epoch_batches(rows, rank, world, completed, processor, args.images)
+    else:
+        recipe["ids"] = [row["id"] for row in rows]
+        prompt, answer = prepare_example(processor, rows[rank], args.images, device)
+        batches = ((prompt, answer, 1.0) for _ in range(updates))
     if rank == 0:
-        recipe = {
-            "base": BASE,
-            "revision": REVISION,
-            "world_size": world,
-            "updates": args.updates,
-            "ids": [row["id"] for row in rows],
-            "data_sha256": hashlib.sha256(args.data.read_bytes()).hexdigest(),
-            "latent_steps": 8,
-            "decorrelation_weight": 0.1,
-            "seed": 42,
-            "learning_rate": 1e-5,
-        }
         (args.output / "recipe.json").write_text(json.dumps(recipe, indent=2))
-    for step in range(1, args.updates + 1):
+    for step, (prompt, answer, weight) in enumerate(batches, completed + 1):
         optim.zero_grad(set_to_none=True)
-        ce, decorrelation = model(prompt, answer)
-        loss = ce + 0.1 * decorrelation
+        ce, decorrelation = model(prompt.to(device), answer.to(device))
+        loss = (ce + 0.1 * decorrelation) * weight
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
         optim.step()
-        stats = torch.stack([ce.detach(), decorrelation.detach()])
+        stats = torch.stack([ce.detach(), decorrelation.detach()]) * weight
         dist.all_reduce(stats, op=dist.ReduceOp.AVG)
         if rank == 0:
             print(
@@ -199,6 +281,8 @@ def main():
                 ),
                 flush=True,
             )
+        if args.full_epoch and step % 1000 == 0 and step < updates:
+            save_training_state(base, processor, optim, args.output, step, recipe, rank)
     if rank == 0:
         base.save_pretrained(args.output)
         processor.save_pretrained(args.output)
