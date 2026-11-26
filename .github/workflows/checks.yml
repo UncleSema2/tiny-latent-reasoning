@@ -11,3 +11,5 @@ jobs:
           python-version: '3.12'
       - name: Check baseline recipes
         run: python -m unittest discover -s tests -p test_baseline.py
+      - name: Check LUT curriculum
+        run: python -m unittest discover -s tests -p test_lut_curriculum.py
