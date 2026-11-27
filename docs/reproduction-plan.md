@@ -1,6 +1,6 @@
 # Reproducing LVR, LUT and HyLaR
 
-The base checkpoints already have full-suite measurements. Use those predictions and the released LVR-7B evaluation as controls. Finish the running LVR experiment on its training branch. LUT preparation and HyLaR reference checks can proceed independently. [Measured baselines and evaluation protocols](../README.md#benchmark-results)
+The base checkpoints already have full-suite measurements. Use those predictions and the released LVR-7B evaluation as controls. The full 7B LVR-SFT run and its three decoding budgets are recorded in the [final checkpoint results](../README.md#lvr-7b-after-2500-training-steps). LUT preparation and HyLaR reference checks can proceed independently. [Measured baselines and evaluation protocols](../README.md#benchmark-results)
 
 ## LVR
 
