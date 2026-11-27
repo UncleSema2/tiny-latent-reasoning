@@ -60,6 +60,22 @@ class TrajectoryReplayTests(unittest.TestCase):
         for answer in (torch.tensor([[13]]), torch.tensor([[13, 17, 23]])):
             with self.subTest(length=answer.numel()):
                 logits, z = teacher(prompt, answer, return_trajectory=True)
+                cached_logits, cached_z, layers = teacher(
+                    prompt, answer, collect_layers=True
+                )
+                torch.testing.assert_close(cached_logits, logits)
+                torch.testing.assert_close(cached_z, z)
+                self.assertEqual(tuple(layers.shape), (2, 8, 32))
+                torch.testing.assert_close(layers[-1, :-1], z[0, 1:])
+                student = Teacher(model, bounds, bottleneck=False)
+                student_logits, student_z, _ = student(
+                    prompt, answer, collect_layers=True
+                )
+                self.assertAlmostEqual(
+                    native_score(model, prompt, answer, visual, bounds, student_z),
+                    -F.cross_entropy(student_logits[0], answer[0]).item(),
+                    places=5,
+                )
                 self.assertAlmostEqual(
                     native_score(
                         model, prompt, answer, visual, bounds, z, bottleneck=True

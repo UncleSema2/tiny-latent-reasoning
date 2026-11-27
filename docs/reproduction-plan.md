@@ -77,3 +77,15 @@ Intermediate checkpoints at multiples of 1,000 updates contain the processor, we
 Validation measures the teacher-specific quantities used for distillation. It selects 512 distinct Visual-CoT images absent from the training sample. The teacher predicts the reference answer through its trained visual bottleneck. A frozen base judge scores those answer tokens with either the teacher trajectory or random vectors matched to its per-step norms. The output `held-out.json` records answer cross-entropy, token accuracy, exact reference-prefix rate, utility differences and retention at the paper's threshold. Prefix matching ends at the last reference token. The report includes per-question values for paired analysis.
 
 The paired trajectory audit compares the two latent index conventions and tests the learned delimiter inputs on disjoint held-out images. [Audit and reproduction commands](lut-trajectory-audit.md)
+
+### Distill the full LUT student
+
+Run the following command inside a 16-process distributed launch. On one node, use `torchrun --standalone --nproc-per-node=N` with one process per GPU. For multiple nodes, supply the usual torchrun rendezvous arguments.
+
+```sh
+uv run --frozen --extra train python -m methods.lut.student --teacher runs/lut-teacher --data data/lut/train.jsonl --images data/cot_image_data --output runs/lut-student
+```
+
+The command scores all training examples using eight teacher recurrent inputs, matched random vectors and the learned teacher delimiter embeddings in the frozen judge. It caches retained targets in bfloat16 as eight slot outputs from every decoder layer. It applies the strict −0.5 threshold and trains a fresh base student for one epoch in the low-to-high curriculum using ordinary causal attention, answer cross-entropy and cosine alignment. The visual encoder is frozen. The learning rate is 1e-5 and the alignment coefficient is 1.0 in this reproduction.
+
+Repeat the same command with the same output directory and world size after interruption. Each completed block of 16 source examples has an atomic score manifest. Student training resumes at the next update after the latest published checkpoint, including optimizer partitions, RNG states and position in the ordered curriculum. The default checkpoint interval is 250 updates. The final numbered checkpoint contains the student weights and its processor.
