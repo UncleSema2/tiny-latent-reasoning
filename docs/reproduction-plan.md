@@ -1,11 +1,24 @@
 # Reproducing LVR, LUT and HyLaR
 
-The base checkpoints already have full-suite measurements. Use those predictions and the released LVR-7B evaluation as controls. Finish the running LVR experiment on its training branch. LUT preparation and HyLaR reference checks can proceed independently. [Measured baselines and evaluation protocols](../README.md#benchmark-results)
+The base checkpoints already have full-suite measurements. Use those predictions and the released LVR-7B evaluation as controls. The full 7B LVR-SFT run and its three decoding budgets are recorded in the [final checkpoint results](../README.md#lvr-7b-after-2500-training-steps). LUT preparation and HyLaR reference checks can proceed independently. [Measured baselines and evaluation protocols](../README.md#benchmark-results)
 
 ## LVR
 
 1. Evaluate the step-2,500 SFT checkpoint at 4, 8 and 16 latent steps. Compare each budget with step 500, the released checkpoint and Qwen2.5-VL-7B on identical questions. Report both V* subsets, MMVP question and pair accuracy, and individual BLINK tasks. Inspect paired disagreements and the frequency of complete latent spans.
-2. Reproduce the paper's RL experiment on **3B**. Start from an identified SFT checkpoint, pin the ViRL data and check the format and accuracy rewards on sampled responses. Run a small rollout and optimizer update before the 1,500-step run. Compare SFT and latent GRPO at each of the three budgets against Table 2. [LVR, §4](https://arxiv.org/html/2509.24251v2#S4)
+2. Run the one-update 3B pilot below. For the 1,500-step run, retain an independent frozen SFT reference after the first update, support numeric and open-ended ViRL answers, and validate checkpoint resume before comparing all three budgets against Table 2. [LVR, §4](https://arxiv.org/html/2509.24251v2#S4)
+
+### Run one 3B latent GRPO update
+
+Use a local LVR 3B SFT checkpoint with its processor and weights. The measured run used the independent step-2,500 checkpoint identified by its two shard hashes in the [3B results](../README.md#independent-3b-checkpoint). Download `lvr_data/virl39k.json` from the LVR annotations and extract the ViRL image archive so that `--images` contains the `ViRL39K/` directory. The command checks the annotation digest and selects the first four single-image rows with A–D answer labels. [LVR annotations](https://drive.google.com/file/d/1RUbKMQU3H7u8iWDqpDv8aiYDMlUaDIlE/view) · [ViRL image revision](https://huggingface.co/datasets/TIGER-Lab/ViRL39K/tree/812ec617dea4bc8a4e751663b88e4ebb7de4d00e)
+
+```sh
+uv run --frozen --extra train --extra eval -m methods.lvr.grpo_pilot --checkpoint runs/lvr-3b-sft/model --annotations data/lvr/lvr_data/virl39k.json --images data/lvr/images --output runs/lvr-grpo-pilot.json
+```
+
+The pilot samples eight responses per prompt at temperature 0.9, with eight latent steps and a 64-token completion cap. It scores the exact answer letter and the latent-span/answer format independently. The policy forward pass reuses the hidden vectors recorded during generation and scores only discrete actions. At update one the old policy and KL reference both equal the starting SFT model. The single AdamW update uses a constant learning rate of 1e-5, zero weight decay and gradient clipping at 1. Only the language model is updated. The JSON report contains the sampled responses, both rewards and the change in their log probabilities. The updated weights stay in memory for that comparison.
+
+
+On one A100 80 GB, each of two runs with seed 42 produced the same 32 responses and rewards. All responses used eight latent inputs and earned the format reward. Eight earned the accuracy reward (4, 2, 0 and 2 per question). The unclipped gradient norm was 4.007. Mean absolute change in the sampled discrete actions’ log probabilities after the update was 0.323, averaging first within each response. Before the update, the mean and maximum absolute differences between cached rollout and full-sequence replay were 0.0022 and 0.083 in BF16. The measured update, including image preparation, sampling, replay and backward, took 9.0 seconds and peak allocated GPU memory was 48.5 GiB. These measurements cover four selected prompts and one optimizer update.
 
 ## LUT
 
