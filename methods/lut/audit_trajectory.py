@@ -80,11 +80,14 @@ def main():
         parser.add_argument("--" + key, type=Path, required=True)
     parser.add_argument("--base", default=BASE)
     parser.add_argument("--count", type=int, default=512)
+    parser.add_argument("--skip", type=int, default=0)
     args = parser.parse_args()
+    if args.skip < 0 or args.count < 1:
+        parser.error("--skip must be nonnegative and --count must be positive")
     rank, world = int(os.getenv("RANK", "0")), int(os.getenv("WORLD_SIZE", "1"))
     device = torch.device("cuda", int(os.getenv("LOCAL_RANK", "0")))
     torch.cuda.set_device(device)
-    rows = held_out(args.annotations, args.train, args.count)
+    rows = held_out(args.annotations, args.train, args.skip + args.count)[args.skip :]
     previous = {
         r["id"]: r
         for r in json.loads((args.teacher / "held-out.json").read_text())["rows"]
@@ -146,8 +149,13 @@ def main():
             score = partial(native_score, judge, prompt, answer, visual, boundaries)
 
             norm = z.float().norm(dim=-1, keepdim=True)
-            direction = random_direction(z, 43 + i)
+            index = args.skip + i
+            direction = random_direction(z, 43 + index)
             control = (direction * norm).to(z.dtype)
+            post_control = (direction * post.float().norm(dim=-1, keepdim=True)).to(
+                z.dtype
+            )
+            other_image = (F.normalize(wrong.float(), dim=-1) * norm).to(z.dtype)
             text = prompt.input_ids[
                 0, prompt.input_ids[0] != judge.config.image_token_id
             ]
@@ -158,20 +166,21 @@ def main():
                 prompt,
                 answer,
                 z,
-                torch.Generator(device=device).manual_seed(43 + i),
+                torch.Generator(device=device).manual_seed(43 + index),
             )
-            original = previous[row["id"]]
+            original = previous.get(row["id"])
             ce = F.cross_entropy(logits.flatten(0, 1), answer.flatten()).item()
             teacher_visual = teacher.base.get_image_features(
                 prompt.pixel_values, prompt.image_grid_thw
             )
             result = {
                 "id": row["id"],
+                "image": row["image"],
                 "subset": row["subset"],
                 "tokens": answer.numel(),
-                "saved": original["delta"],
+                "saved": original["delta"] if original else None,
                 "replayed": (ref[0] - ref[1]).item(),
-                "saved_ce_error": ce - original["ce"],
+                "saved_ce_error": ce - original["ce"] if original else None,
                 "cached_teacher": -ce,
                 "replayed_teacher": native_score(
                     teacher.base,
@@ -185,17 +194,22 @@ def main():
                 "judge_paired": ref.tolist(),
                 "native": score(z),
                 "random": score(control),
-                "random2": score((random_direction(z, 1703 + i) * norm).to(z.dtype)),
-                "shifted": score(post),
-                "shifted_control": score(
-                    (direction * post.float().norm(dim=-1, keepdim=True)).to(z.dtype)
+                "random2": score(
+                    (random_direction(z, 1703 + index) * norm).to(z.dtype)
                 ),
+                "shifted": score(post),
+                "shifted_control": score(post_control),
                 "scaled": score(
                     (F.normalize(z.float(), dim=-1) * text_norm).to(z.dtype)
                 ),
                 "scaled_control": score((direction * text_norm).to(z.dtype)),
-                "wrong_image": score(
-                    (F.normalize(wrong.float(), dim=-1) * norm).to(z.dtype)
+                "wrong_image": score(other_image),
+                "trained_bounds_wrong_image": score(
+                    other_image, boundary_vectors=teacher_bounds
+                ),
+                "trained_bounds_shifted": score(post, boundary_vectors=teacher_bounds),
+                "trained_bounds_shifted_control": score(
+                    post_control, boundary_vectors=teacher_bounds
                 ),
                 "trained_bounds": score(z, boundary_vectors=teacher_bounds),
                 "trained_bounds_control": score(
