@@ -5,7 +5,7 @@ The base checkpoints already have full-suite measurements. Use those predictions
 ## LVR
 
 1. Evaluate the step-2,500 SFT checkpoint at 4, 8 and 16 latent steps. Compare each budget with step 500, the released checkpoint and Qwen2.5-VL-7B on identical questions. Report both V* subsets, MMVP question and pair accuracy, and individual BLINK tasks. Inspect paired disagreements and the frequency of complete latent spans.
-2. Run the one-update 3B pilot below. For the 1,500-step run, retain an independent frozen SFT reference after the first update, support numeric and open-ended ViRL answers, and validate checkpoint resume before comparing all three budgets against Table 2. [LVR, §4](https://arxiv.org/html/2509.24251v2#S4)
+2. Run the one-update 3B pilot below. Calibrate the frozen-reference objective and checkpoint restart on mixed questions before expanding the reward to the full ViRL answer set. Compare the resulting 1,500-step model with SFT at all three decoding budgets against Table 2. [LVR, §4](https://arxiv.org/html/2509.24251v2#S4)
 
 ### Run one 3B latent GRPO update
 
@@ -19,6 +19,29 @@ The pilot samples eight responses per prompt at temperature 0.9, with eight late
 
 
 On one A100 80 GB, each of two runs with seed 42 produced the same 32 responses and rewards. All responses used eight latent inputs and earned the format reward. Eight earned the accuracy reward (4, 2, 0 and 2 per question). The unclipped gradient norm was 4.007. Mean absolute change in the sampled discrete actions’ log probabilities after the update was 0.323, averaging first within each response. Before the update, the mean and maximum absolute differences between cached rollout and full-sequence replay were 0.0022 and 0.083 in BF16. The measured update, including image preparation, sampling, replay and backward, took 9.0 seconds and peak allocated GPU memory was 48.5 GiB. These measurements cover four selected prompts and one optimizer update.
+
+### Calibrate multi-step 3B latent GRPO
+
+The calibration uses the same SFT weights, 0.9 temperature and eight generations per question. Each update consumes two single-image A–D questions and two single-image questions with plain numeric answers. The two pools are shuffled independently in sequence with Python seed 42. Numeric scoring compares exact rational values, so `0.5` and `1/2` receive the same accuracy reward. The 64-token completion cap, constant learning rate, strict answer extraction and four prompts per update define this calibration.
+
+The policy samples fresh trajectories at every update. The reference starts from the original SFT checkpoint and stays frozen. Both policies use the recorded latent vectors and the same frozen visual features during replay. The optimizer takes one step per freshly sampled batch. The old policy therefore matches the current policy at the start of each update. The sampled KL estimate is averaged over discrete token actions within each response and then across responses, with coefficient 0.04 in the objective. The calibration also reports the exact forward KL over the vocabulary at these same replayed prefixes.
+
+```sh
+uv run --frozen --extra train --extra eval -m methods.lvr.grpo_calibration --checkpoint runs/lvr-3b-sft/model --annotations data/lvr/lvr_data/virl39k.json --images data/lvr/images --output runs/lvr-3b-calibration --steps 6 --save-at 3
+```
+
+To repeat updates 4–6 from a saved state, use the same command with `--resume runs/lvr-3b-calibration/checkpoint-3` and a fresh `--output` directory. The checkpoint includes the policy and processor, AdamW state, step, CPU and GPU RNG states, and digests of the SFT input files and selected images. The reference is reloaded from `--checkpoint`. Each invocation writes one record per completed update to `updates.jsonl`. Set `--learning-rate 5e-6` and use a fresh output to run the matched control with the learning rate in the released 3B launcher. The paper specifies 1e-5. [Author launcher](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/scripts/finetune_lvr_stage2_3b.sh) · [LVR experiment settings](https://arxiv.org/html/2509.24251v2#S4)
+
+Across six updates, each run trained on the same 24 distinct questions and images. The 192 responses comprise 96 letter answers and 96 numeric answers. Accuracy and format below are training rewards. The last column sums forward KL over the entire discrete vocabulary at the final update’s sampled prefixes.
+
+| Learning rate | Correct letters / 96 | Correct numbers / 96 | Full format / 192 | Full format at step 6 / 32 | Sampled KL at step 6 | Conditional KL at step 6 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1e-5 | 43 | 18 | 94 | 0 | 1.7828 | 2.0056 |
+| 5e-6 | 44 | 25 | 174 | 28 | 0.0173 | 0.0116 |
+
+After restarting the 1e-5 run at step 3, all 96 subsequent responses and their rewards matched the uninterrupted run. All 824 final policy tensors and 1,302 optimizer tensors matched byte for byte, as did the CPU and GPU RNG states.
+
+On one A100 80 GB, mean update times were 11.9 s at 1e-5 and 12.0 s at 5e-6. At these batch and length settings, 1,500 updates would take approximately 4.9–5.0 GPU hours for rollouts, replay, backward and optimizer steps. Post-update diagnostic replay is timed separately. A checkpoint occupied about 38 GiB and took 95–238 seconds to save. Longer responses and the remaining ViRL answer types require a separate throughput measurement.
 
 ## LUT
 

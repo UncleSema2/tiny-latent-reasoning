@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import re
+from fractions import Fraction
 from pathlib import Path
 from time import perf_counter
 from typing import NamedTuple
@@ -55,7 +56,7 @@ def prepare(model, processor, row, images):
     if ids.eq(model.config.image_token_id).sum() != len(vision):
         raise ValueError(f"Image token count mismatch on {row['id']}")
     return (ids, positions, vision), re.fullmatch(
-        r"<answer>([A-D])</answer>", answer["value"]
+        r"<answer>(.+?)</answer>", answer["value"], re.DOTALL
     )[1]
 
 
@@ -116,7 +117,7 @@ def rollout(model, prompt, stops):
     return trajectories
 
 
-def replay(model, prompt, trajectory):
+def replay_distribution(model, prompt, trajectory):
     _, pos, _ = prompt
     device = model.device
     ids = torch.tensor([a.token for a in trajectory], device=device)
@@ -134,44 +135,53 @@ def replay(model, prompt, trajectory):
     scores = model.lm_head(hidden[0, -len(ids) :]).float() / TEMPERATURE
     # Discrete actions outside the latent interval, including the opening decision.
     mask = torch.tensor([a.latent_input is None for a in trajectory], device=device)
-    return scores[mask].log_softmax(-1).gather(1, ids[mask, None]).squeeze(1), mask
+    return scores[mask].log_softmax(-1), ids[mask, None], mask
+
+
+def replay(model, prompt, trajectory):
+    distribution, targets, mask = replay_distribution(model, prompt, trajectory)
+    return distribution.gather(1, targets).squeeze(1), mask
+
+
+# The calibration accepts plain decimal and rational answers from ViRL.
+NUMBER = re.compile(r"[+-]?(?:[0-9]+/[1-9][0-9]*|[0-9]+(?:\.[0-9]+)?|\.[0-9]+)")
+
+
+def number(text):
+    if len(text) <= 128 and NUMBER.fullmatch(text):
+        return Fraction(text)
+    return None
 
 
 def rewards(text, target):
     answer = re.search(r"<answer>(.*?)</answer>", text)
-    letter = (answer[1] if answer else text).strip()
+    prediction = (answer[1] if answer else text).strip()
+    target_number = number(target)
+    correct = (
+        number(prediction) == target_number
+        if target_number is not None
+        else prediction == target
+    )
     formatted = re.fullmatch(
         r"<\|lvr_start\|>.*?<\|lvr_end\|>\s*<answer>.*?</answer>", text
     )
-    return int(letter == target), int(formatted is not None)
+    return int(correct), int(formatted is not None)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("checkpoint", "annotations", "images", "output"):
-        parser.add_argument(f"--{name}", type=Path, required=True)
-    args = parser.parse_args()
-    raw = args.annotations.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != ANNOTATIONS_SHA256:
-        parser.error("Expected the original LVR ViRL annotation file")
-    if args.output.exists():
-        parser.error("Use a fresh output file")
-    rows = [
-        r
-        for r in json.loads(raw)
-        if isinstance(r["image"], str)
-        and re.fullmatch(r"<answer>[A-D]</answer>", r["conversations"][1]["value"])
-    ][:4]
-    set_seed(42)
-    processor = AutoProcessor.from_pretrained(args.checkpoint)
+def load_processor(checkpoint):
+    processor = AutoProcessor.from_pretrained(checkpoint)
     processor.image_processor.size = {
         "shortest_edge": 128 * 28**2,
         "longest_edge": 5120 * 28**2,
     }
+    return processor
+
+
+def load_policy(checkpoint, model_class=Qwen2_5_VLForConditionalGeneration):
     model = (
         load_base(
-            Qwen2_5_VLForConditionalGeneration,
-            args.checkpoint,
+            model_class,
+            checkpoint,
             dtype=torch.float32,
             attn_implementation="sdpa",
         )
@@ -179,21 +189,30 @@ def main():
         .eval()
     )
     model.model.visual.requires_grad_(False)
-    optimizer = torch.optim.AdamW(
+    return model
+
+
+def make_optimizer(model, learning_rate=1e-5):
+    return torch.optim.AdamW(
         (p for p in model.parameters() if p.requires_grad),
-        lr=1e-5,
+        lr=learning_rate,
         weight_decay=0.0,
         fused=True,
     )
+
+
+def run_update(model, processor, optimizer, rows, images, reference=None):
     controls = {processor.tokenizer.eos_token_id, processor.tokenizer.pad_token_id}
     summary = []
     probes = []
+    kl_means = []
+    conditional_kls = []
     torch.cuda.synchronize()
     started = perf_counter()
     replay_errors = []
     for row in rows:
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            prompt, target = prepare(model, processor, row, args.images)
+            prompt, target = prepare(model, processor, row, images)
             paths = rollout(model, prompt, controls)
         texts = [
             processor.tokenizer.decode(
@@ -209,12 +228,26 @@ def main():
         advantages = (total - total.mean()) / (total.std() + 1e-4)
         for path, advantage in zip(paths, advantages, strict=True):
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                logp, mask = replay(model, prompt, path)
+                policy_dist, targets, mask = replay_distribution(model, prompt, path)
+                logp = policy_dist.gather(1, targets).squeeze(1)
             sampled = torch.tensor([a.sampled_logp for a in path], device="cuda")[mask]
-            # On the first update, reference and old policy share the initial parameters.
             old = logp.detach()
             ratio = (logp - old).exp()
-            kl = (old - logp).exp() - (old - logp) - 1
+            if reference is None:
+                reference_logp = old
+            else:
+                with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                    ref_dist, _, _ = replay_distribution(reference, prompt, path)
+                    reference_logp = ref_dist.gather(1, targets).squeeze(1)
+                    # Sum over the vocabulary on the very same replayed prefixes.
+                    detached = policy_dist.detach()
+                    conditional_kls.append(
+                        (detached.exp() * (detached - ref_dist)).sum(-1).mean()
+                    )
+                    del ref_dist, detached
+            difference = reference_logp - logp
+            kl = difference.expm1() - difference
+            kl_means.append(kl.detach().mean())
             objective = (
                 torch.minimum(ratio * advantage, ratio.clamp(0.8, 1.2) * advantage)
                 - 0.04 * kl
@@ -238,13 +271,12 @@ def main():
     norm = torch.nn.utils.clip_grad_norm_(
         model.parameters(), 1.0, error_if_nonfinite=True
     ).item()
-    if not norm:
+    if not norm and reference is None:
         raise RuntimeError("No gradient from the sampled groups")
     optimizer.step()
     torch.cuda.synchronize()
     update_seconds = perf_counter() - started
     optimizer.zero_grad(set_to_none=True)
-    del optimizer
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         changes = [
             (replay(model, prompt, path)[0].cpu() - old).abs().mean().item()
@@ -260,8 +292,37 @@ def main():
         "mean_abs_logp_change": sum(changes) / len(changes),
         "peak_gpu_GiB": torch.cuda.max_memory_allocated() / 1024**3,
     }
-    if not all(math.isfinite(v) for v in changes) or not any(changes):
+    if reference is not None:
+        result["mean_reference_kl"] = torch.stack(kl_means).mean().item()
+        result["mean_conditional_kl"] = torch.stack(conditional_kls).mean().item()
+        result["step_with_diagnostics_seconds"] = perf_counter() - started
+    if not all(math.isfinite(v) for v in changes) or (
+        reference is None and not any(changes)
+    ):
         raise RuntimeError("The optimizer step did not produce a finite policy change")
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ("checkpoint", "annotations", "images", "output"):
+        parser.add_argument(f"--{name}", type=Path, required=True)
+    args = parser.parse_args()
+    raw = args.annotations.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != ANNOTATIONS_SHA256:
+        parser.error("Expected the original LVR ViRL annotation file")
+    if args.output.exists():
+        parser.error("Use a fresh output file")
+    rows = [
+        r
+        for r in json.loads(raw)
+        if isinstance(r["image"], str)
+        and re.fullmatch(r"<answer>[A-D]</answer>", r["conversations"][1]["value"])
+    ][:4]
+    set_seed(42)
+    processor = load_processor(args.checkpoint)
+    model = load_policy(args.checkpoint)
+    result = run_update(model, processor, make_optimizer(model), rows, args.images)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as f:
         json.dump(result, f, indent=2, allow_nan=False)
