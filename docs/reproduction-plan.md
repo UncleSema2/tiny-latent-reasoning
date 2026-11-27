@@ -75,3 +75,5 @@ uv run --frozen --extra train torchrun --standalone --nproc-per-node=8 --module 
 Intermediate checkpoints at multiples of 1,000 updates contain the processor, weights and each rank's optimizer state. Resume into a fresh output directory with `--full-epoch --resume-from PATH`, the original data and the same number of ranks.
 
 Validation measures the teacher-specific quantities used for distillation. It selects 512 distinct Visual-CoT images absent from the training sample. The teacher predicts the reference answer through its trained visual bottleneck. A frozen base judge scores those answer tokens with either the teacher trajectory or random vectors matched to its per-step norms. The output `held-out.json` records answer cross-entropy, token accuracy, exact reference-prefix rate, utility differences and retention at the paper's threshold. Prefix matching ends at the last reference token. The report includes per-question values for paired analysis.
+
+The paired trajectory audit compares the two latent index conventions and tests the learned delimiter inputs on disjoint held-out images. [Audit and reproduction commands](lut-trajectory-audit.md)
