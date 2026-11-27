@@ -5,7 +5,7 @@ The base checkpoints already have full-suite measurements. Use those predictions
 ## LVR
 
 1. Evaluate the step-2,500 SFT checkpoint at 4, 8 and 16 latent steps. Compare each budget with step 500, the released checkpoint and Qwen2.5-VL-7B on identical questions. Report both V* subsets, MMVP question and pair accuracy, and individual BLINK tasks. Inspect paired disagreements and the frequency of complete latent spans.
-2. Run the one-update 3B pilot below. Calibrate the frozen-reference objective and checkpoint restart on mixed questions before expanding the reward to the full ViRL answer set. Compare the resulting 1,500-step model with SFT at all three decoding budgets against Table 2. [LVR, §4](https://arxiv.org/html/2509.24251v2#S4)
+2. Use the saved mixed-question GRPO run as a control. Before training on the full ViRL answer set, verify the released reward, latent loss mask and scheduler on fixed trajectories. Start the cosine schedule with a 1,500-update horizon so a restart can restore its exact position. Compare the resulting model with SFT at all three decoding budgets against Table 2. [LVR, §4](https://arxiv.org/html/2509.24251v2#S4)
 
 ### Run one 3B latent GRPO update
 
@@ -32,6 +32,18 @@ uv run --frozen --extra train --extra eval -m methods.lvr.grpo_calibration --che
 
 To repeat updates 4–6 from a saved state, use the same command with `--resume runs/lvr-3b-calibration/checkpoint-3` and a fresh `--output` directory. The checkpoint includes the policy and processor, AdamW state, step, CPU and GPU RNG states, and digests of the SFT input files and selected images. The reference is reloaded from `--checkpoint`. Each invocation writes one record per completed update to `updates.jsonl`. Set `--learning-rate 5e-6` and use a fresh output to run the matched control with the learning rate in the released 3B launcher. The paper specifies 1e-5. [Author launcher](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/scripts/finetune_lvr_stage2_3b.sh) · [LVR experiment settings](https://arxiv.org/html/2509.24251v2#S4)
 
+To extend a completed six-step run at 5e-6 through update 1,500, pass its final checkpoint and the same SFT reference, data and learning rate:
+
+```sh
+uv run --frozen --extra train --extra eval -m methods.lvr.grpo_calibration \
+  --checkpoint runs/lvr-3b-sft/model --annotations data/lvr/lvr_data/virl39k.json \
+  --images data/lvr/images --learning-rate 5e-6 --steps 1500 \
+  --resume runs/lvr-3b-calibration-5e-6/checkpoint-6 --output runs/lvr-3b-grpo-1500 \
+  --save-at 12 --save-every 100
+```
+
+The first update is 7. The trainer verifies the previous plan's complete sequence of question IDs and image hashes against the start of the extended plan. It saves at global updates 12, 100, 200 and each subsequent multiple of 100, including 1,500. After an interruption, use the highest completed `checkpoint-N` as `--resume`, choose a fresh output directory and keep the target at 1,500. The next update is N + 1. Checkpoints appear under their final name only after the policy, processor and training state have been written. This extension retains the two answer types and the 64-token cap of the six-step run. For replay sequences of at least 1,024 tokens, the trainer recomputes decoder-layer activations during backward. This keeps high-resolution image inputs, the group size and the sampling sequence intact.
+
 Across six updates, each run trained on the same 24 distinct questions and images. The 192 responses comprise 96 letter answers and 96 numeric answers. Accuracy and format below are training rewards. The last column sums forward KL over the entire discrete vocabulary at the final update’s sampled prefixes.
 
 | Learning rate | Correct letters / 96 | Correct numbers / 96 | Full format / 192 | Full format at step 6 / 32 | Sampled KL at step 6 | Conditional KL at step 6 |
@@ -42,6 +54,26 @@ Across six updates, each run trained on the same 24 distinct questions and image
 After restarting the 1e-5 run at step 3, all 96 subsequent responses and their rewards matched the uninterrupted run. All 824 final policy tensors and 1,302 optimizer tensors matched byte for byte, as did the CPU and GPU RNG states.
 
 On one A100 80 GB, mean update times were 11.9 s at 1e-5 and 12.0 s at 5e-6. At these batch and length settings, 1,500 updates would take approximately 4.9–5.0 GPU hours for rollouts, replay, backward and optimizer steps. Post-update diagnostic replay is timed separately. A checkpoint occupied about 38 GiB and took 95–238 seconds to save. Longer responses and the remaining ViRL answer types require a separate throughput measurement.
+
+### Results after 1,500 GRPO updates
+
+The run continued the six-update 5e-6 checkpoint on one A100 80 GB. An image at update 21 exhausted GPU memory during policy replay. After enabling activation recomputation for long replays, the run restored update 12. Responses, rewards, gradient norms and KL metrics for updates 13 through 20 matched the first attempt. The resumed run reached 1,500, and its final checkpoint contained readable model weights, the two RNG states and all 434 AdamW states at step 1,500. The measured continuation took about 6.1 GPU hours including saves, diagnostics and repeated updates.
+
+The local SFT and GRPO checkpoints answered the same questions with greedy decoding and a 512-token cap. The step-100 checkpoint was evaluated with eight latent steps. LMMS-Eval logged 982 predictions per evaluation, including the two V* subsets. Metrics are percentages. MMVP pair accuracy requires both answers in the pair to be correct.
+
+| Metric | SFT 4 | GRPO-1500 4 | SFT 8 | GRPO-100 8 | GRPO-1500 8 | SFT 16 | GRPO-1500 16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| V* overall | 68.59 | 66.49 | 69.11 | 73.30 | 67.02 | 69.63 | 67.02 |
+| V* Direct Attributes | 74.78 | 73.04 | 74.78 | 78.26 | 72.17 | 76.52 | 71.30 |
+| V* Relative Position | 60.53 | 59.21 | 59.21 | 64.47 | 59.21 | 59.21 | 60.53 |
+| MMVP questions | 64.67 | 63.67 | 65.33 | 64.67 | 63.33 | 65.00 | 63.67 |
+| MMVP pairs | 33.33 | 31.33 | 34.67 | 33.33 | 31.33 | 36.00 | 31.33 |
+| BLINK IQ-Test | 30.00 | 3.33 | 31.33 | 27.33 | 3.33 | 29.33 | 3.33 |
+| BLINK Jigsaw | 52.67 | 46.67 | 52.67 | 50.00 | 48.00 | 52.67 | 50.00 |
+
+At eight latent steps, the step-100 checkpoint solved 14 V* questions missed by SFT and missed six that SFT solved. It produced an answer letter on all 150 IQ-Test questions. The step-1,500 checkpoint produced 139, 138 and 139 empty IQ-Test responses at 4, 8 and 16 latent steps, respectively. Every empty response reached the 512-token cap. A token trace on the first failing IQ-Test question at eight latent steps reproduced the empty response. Its 512 tokens comprised one opening marker, four closing markers and 507 latent-end markers. The SFT checkpoint produced a letter on all 150 questions at each budget. Across sampled training responses, the format reward rate fell from 96.28% on updates 1–100 to 50.91% on updates 1,401–1,500. Exact conditional KL on replayed prefixes rose from 0.0793 to 0.8965 over the same windows.
+
+This experiment used the local SFT checkpoint, a 64-token training completion cap and a constant learning rate. Its two answer types cover 30,458 of the 38,870 annotated ViRL rows. The 1,500 updates used 6,000 distinct rows sampled from those two pools. The released launcher sets a 512-token completion cap, cosine scheduling with 3% warmup and 0.1 weight decay. Its trainer masks tokens from the opening marker through the latent span up to the closing marker. The local calibration scores the opening marker and masks the actions sampled during latent feedback. These differences define the checks needed before testing the released recipe. [LVR Table 2](https://arxiv.org/html/2509.24251v2#S4.T2) · [Released launcher](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/scripts/finetune_lvr_stage2_3b.sh) · [Released trainer](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/src/trainer/grpo_trainer.py#L740-L757)
 
 ## LUT
 

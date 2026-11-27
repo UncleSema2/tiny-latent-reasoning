@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import re
+from contextlib import contextmanager
 from fractions import Fraction
 from pathlib import Path
 from time import perf_counter
@@ -117,6 +118,29 @@ def rollout(model, prompt, stops):
     return trajectories
 
 
+# Long image prefixes can exhaust memory when gradients and AdamW are resident.
+CHECKPOINT_TOKENS = 1024
+
+
+@contextmanager
+def checkpoint_long_replay(decoder, length):
+    if length < CHECKPOINT_TOKENS or not torch.is_grad_enabled():
+        yield
+        return
+    if not decoder.is_gradient_checkpointing:
+        decoder.gradient_checkpointing_enable({"use_reentrant": False})
+    # Only the decoder-layer wrappers need training mode for recomputation.
+    # Attention, dropout and the rest of the policy keep their rollout behavior.
+    modes = [layer.training for layer in decoder.layers]
+    for layer in decoder.layers:
+        layer.training = True
+    try:
+        yield
+    finally:
+        for layer, mode in zip(decoder.layers, modes, strict=True):
+            layer.training = mode
+
+
 def replay_distribution(model, prompt, trajectory):
     _, pos, _ = prompt
     device = model.device
@@ -129,9 +153,11 @@ def replay_distribution(model, prompt, trajectory):
     inputs = torch.cat([embed_prompt(model, prompt), embeds[None, :-1]], dim=1)
     tail = (pos.max() + 1 + torch.arange(len(ids) - 1, device=device)).expand(3, 1, -1)
     positions = torch.cat([pos, tail], dim=2)
-    hidden = model.model.language_model(
-        inputs_embeds=inputs, position_ids=positions, use_cache=False
-    ).last_hidden_state
+    decoder = model.model.language_model
+    with checkpoint_long_replay(decoder, inputs.shape[1]):
+        hidden = decoder(
+            inputs_embeds=inputs, position_ids=positions, use_cache=False
+        ).last_hidden_state
     scores = model.lm_head(hidden[0, -len(ids) :]).float() / TEMPERATURE
     # Discrete actions outside the latent interval, including the opening decision.
     mask = torch.tensor([a.latent_input is None for a in trajectory], device=device)
