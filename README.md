@@ -255,7 +255,7 @@ On the first 64 high-resolution V* questions, the step-500 model achieved the fo
 
 ### LVR-7B after 2,500 training steps
 
-We resumed the step-500 checkpoint on 16 A100 80 GB GPUs with four accumulation steps per rank, keeping 64 adaptive packs per optimizer update. The remaining 2,000 updates and final save took about ten hours. Each evaluation produced 1,379 predictions at its fixed decoding budget on the same questions and targets as the base and released checkpoints. V* subset questions also appear in the overall split. Scores are percentages.
+We resumed the step-500 checkpoint on 16 A100 80 GB GPUs with four accumulation steps per rank, keeping 64 adaptive packs per optimizer update. The remaining 2,000 updates and final save took about ten hours. The final model file has SHA-256 digest `87dde370fbb0f7748bdf1125ec67378125655d860b3194f37c34a6950352d297`. Each evaluation produced 1,379 predictions at its fixed decoding budget on the same questions and targets as the base and released checkpoints. V* subset questions also appear in the overall split. Scores are percentages.
 
 | Metric | Base | Released, 8 | Step 500, 8 | Final, 4 | Final, 8 | Final, 16 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -270,7 +270,7 @@ We resumed the step-500 checkpoint on 16 A100 80 GB GPUs with four accumulation 
 | BLINK Relative Reflectance | 34.33 | 31.34 | 26.87 | 29.85 | 32.09 | 30.60 |
 | BLINK Spatial Relation | 89.51 | 88.11 | 85.31 | 88.11 | 87.41 | 88.81 |
 
-At eight latent steps, the final model answered 157/191 V* questions correctly, gaining seven and losing five relative to step 500. On BLINK Jigsaw it fell from 110/150 to 91/150, gaining eight and losing 27. We matched the source question, target and document hash, and independently read the answer letter in all 150 final responses at each budget. All 450 letters agreed with the evaluator. Of the 27 losses at eight steps, 23 responses contained only a letter inside the answer tags and four added a matching image description. The final model chose the second image (A) on 23 of the 27 losses.
+At eight latent steps, the final model answered 157/191 V* questions correctly, gaining seven and losing five relative to step 500. On BLINK Jigsaw it fell from 110/150 to 91/150, gaining eight and losing 27. We matched the source question, target and document hash, and independently read the answer letter in all 150 final responses at each budget. All 450 letters agreed with the evaluator. Of the 27 losses at eight steps, 23 responses contained only a letter inside the answer tags and four added a matching image description. The final model chose the second image (A) on 23 of the 27 losses. In a separate greedy decoding check with eight latent steps, all 191 V* responses contained one ordered pair of latent start and end markers and a letter inside the answer tags.
 
 ### Independent 3B checkpoint
 
