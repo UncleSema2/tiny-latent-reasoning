@@ -165,6 +165,8 @@ def main():
     processor = pilot.load_processor(args.checkpoint)
     reference = pilot.load_policy(args.checkpoint, QwenWithLVR).requires_grad_(False)
     model = pilot.load_policy(args.resume or args.checkpoint, QwenWithLVR)
+    # Both policies use features from the same frozen SFT vision tower.
+    reference.model.visual = model.model.visual
     optimizer = pilot.make_optimizer(model, args.learning_rate)
     if args.resume:
         optimizer.load_state_dict(state["optimizer"])

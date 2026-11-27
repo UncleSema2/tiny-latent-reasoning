@@ -58,6 +58,20 @@ class LatentPolicyTests(unittest.TestCase):
         torch.testing.assert_close(logp, cached, atol=1e-5, rtol=1e-5)
         logp.sum().backward()
         self.assertGreater(model.lm_head.weight.grad.norm().item(), 0)
+        expected = {
+            n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None
+        }
+        model.zero_grad(set_to_none=True)
+        with patch("methods.lvr.grpo_pilot.CHECKPOINT_TOKENS", 1):
+            recomputed, _ = replay(model, prompt, paths[0])
+            recomputed.sum().backward()
+        torch.testing.assert_close(recomputed, logp, rtol=0, atol=0)
+        for name, param in model.named_parameters():
+            if name in expected:
+                torch.testing.assert_close(param.grad, expected[name], rtol=0, atol=0)
+        self.assertFalse(
+            any(layer.training for layer in model.model.language_model.layers)
+        )
 
     def test_resume_accepts_the_original_plan_or_an_exact_extension(self):
         groups = [[("first", "digest1")], [("second", "digest2")]]
