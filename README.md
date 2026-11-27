@@ -187,3 +187,96 @@ One A100 80 GB, eight latent steps, the first 64 V* high-resolution questions in
 | 64 | 1.50 | 94.8 | 47.12 |
 
 On the first two V* questions, single-request and batched generation both entered one latent span, emitted eight latent placeholders and returned the reference choices A and C. During latent steps the engine masks end-of-sequence tokens to keep the request alive. The reference can emit such a token inside the span. Across all 64 questions, the final answer matched the saved reference on 57, 58 and 58 questions at concurrency 16, 32 and 64, respectively. This comparison measures end-to-end agreement across inference stacks.
+
+## Training LVR with Visual CoT
+
+This command trains the 3B model and evaluates the resulting checkpoint at 4, 8 and 16 latent steps.
+
+```sh
+uv run --frozen --extra train --extra eval scripts/lvr_sft.py --size 3b --gpus 8 --data data/lvr --output runs/lvr-3b-sft
+```
+
+Use `--size 7b` for the 7B recipe and `--answer-only` for the ordinary SFT control on the same examples. Multiple GPUs on one node use FSDP2. Each rank processes eight adaptive microbatches per optimizer update. Short examples share a padded batch of up to four examples. Sequences of at least 4,096 tokens run individually. The recipe uses 2,500 updates, a frozen vision tower and merger, a peak learning rate of 1e-5, and a cosine schedule. The LVR objective adds 0.1 times the mean squared error on the selected visual embeddings to answer and boundary-token cross-entropy.
+
+The first run fetches the authors' two annotation files and the pinned Visual CoT image archives. Set `HF_HOME` on storage with room for approximately 130 GiB of archive parts plus the extracted images, model weights and optimizer checkpoints. Existing annotations in `lvr_data/` under the data directory are checked by SHA-256. Existing images are read from `images/viscot/`. The release contains 417,453 single-image training records. [Author annotations](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/README.md#dataset-preparation) · [Visual CoT image revision](https://huggingface.co/datasets/deepcs233/Visual-CoT/tree/223d2d8c1146fda2bb918801b8276c587b78b61c)
+
+The one-GPU pilot trains on a fixed four-example subset.
+
+```sh
+uv run --frozen --extra train -m methods.lvr.training --data data/lvr --output runs/lvr-3b-overfit --overfit 4 --batch-size 4 --accumulation 1 --steps 24
+```
+
+All 824 tensors in the 3B base checkpoint and all 729 tensors in the 7B base checkpoint matched their source values before training. On one A100 80 GB, the 3B pilot took 47.6 seconds for 24 updates. Text cross-entropy fell from 5.635 to 1.372 and visual reconstruction MSE from 23.736 to 7.862 on the four training examples. The collator matched the Qwen processor prompt tokens and image grids for all four.
+
+Decode the same four questions with SGLang to inspect the generated text, count latent start markers and check the answer suffix against the annotation.
+
+```sh
+uv run --frozen --extra train --extra eval -m methods.lvr.training.check_overfit --data data/lvr --checkpoint runs/lvr-3b-overfit
+```
+
+With eight latent steps allowed, all four generated answers matched the targets after 24 updates. The LVR pilot started each response with `<|im_start|>` and generated zero latent spans. The matched answer-only control also produced all four target answers.
+
+Repeating the training command from the base checkpoint with `--steps 96` and a fresh output directory reduced text cross-entropy to 0.453 and region MSE to 5.522. All four responses began with `<|lvr_start|>`. Zero of four ended with the target answer at the eight-step decoding budget. The teacher-forced region lengths on these four records were 52, 12, 4 and 112 tokens.
+
+### LVR-7B after 500 training steps
+
+This command runs the first 500 updates of the 2,500-step schedule and evaluates the saved weights at all three decoding budgets.
+
+```sh
+uv run --frozen --extra train --extra eval scripts/lvr_sft.py --size 7b --gpus 8 --data data/lvr --output runs/lvr-7b-sft --steps 2500 --stop-after 500
+```
+
+The checkpoint includes the optimizer, scheduler and RNG state for each rank. To train the remaining 2,000 updates, repeat the command with `--resume` in place of `--stop-after 500`. For a distributed FSDP restart, the training module accepts a different world size if the number of packs per optimizer update stays fixed. For example, 16 ranks with four accumulation steps preserve the batch of eight ranks with eight accumulation steps. The training manifest records the change. Floating-point reductions can differ across layouts. The run to step 500 took 4 h 10 min on eight A100 80 GB GPUs, including startup and saving. The saved model has SHA-256 prefix `bcd5762f081af251`.
+
+Each decoding budget produced 1,379 predictions on the pinned LVR suite. The V* subset tasks repeat questions from the overall split. The released column uses the authors’ checkpoint on the same local harness. All columns report percentages.
+
+| Metric | Base | Released 8 | Step 500, 4 | Step 500, 8 | Step 500, 16 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| V* overall | 81.68 | 81.15 | 82.20 | 81.15 | 81.68 |
+| V* Direct Attributes | 84.35 | 83.48 | 86.09 | 83.48 | 83.48 |
+| V* Relative Position | 77.63 | 76.32 | 76.32 | 77.63 | 76.32 |
+| MMVP questions | 75.00 | 73.33 | 71.33 | 71.67 | 74.67 |
+| MMVP pairs | 51.33 | 48.00 | 44.67 | 45.33 | 50.67 |
+| BLINK Counting | 68.33 | 66.67 | 68.33 | 70.00 | 71.67 |
+| BLINK IQ-Test | 26.67 | 27.33 | 23.33 | 24.00 | 23.33 |
+| BLINK Jigsaw | 68.00 | 56.00 | 72.00 | 73.33 | 75.33 |
+| BLINK Relative Reflectance | 34.33 | 31.34 | 26.12 | 26.87 | 26.87 |
+| BLINK Spatial Relation | 89.51 | 88.11 | 86.01 | 85.31 | 85.31 |
+
+At eight latent steps, the step-500 model and the released model both answered 155 of 191 V* questions correctly. Each solved ten questions that the other missed. On Jigsaw the step-500 model solved 34 questions that the released model missed and missed eight that it solved. On Relative Reflectance the corresponding counts were four and ten. In a separate greedy decoding check on all 191 V* images, every step-500 response opened and closed a latent span and returned a letter inside the answer tags.
+
+On the first 64 high-resolution V* questions, the step-500 model achieved the following throughput at eight latent steps on one A100 80 GB. We used concurrency 64 for the suite.
+
+| Concurrent requests | Questions/s | Mean GPU utilization (%) | Peak GPU memory (GiB) |
+| ---: | ---: | ---: | ---: |
+| 16 | 1.479 | 95.8 | 46.80 |
+| 32 | 1.488 | 92.3 | 46.87 |
+| 64 | 1.510 | 97.1 | 46.89 |
+
+### Independent 3B checkpoint
+
+We also evaluated a previously trained 3B checkpoint from a local adaptation of the authors' implementation, with seed 42, 2,500 optimizer updates and 64 adaptive microbatches per update. The two local weight shards have SHA-256 prefixes `79ad32ff7de9dc8f` and `4888ff83d5aebe29`, in shard order. The full-scale accuracy of the trainer introduced here remains unmeasured. [Reference implementation](https://github.com/VincentLeebang/lvr/tree/637a9f7e17e865b1372b65f182197fbc4a5a1449) · [LVR, Table 2](https://arxiv.org/html/2509.24251v2#S4.T2)
+
+Each local column uses the pinned 3B suite and the MMVP corrections described above. This command reproduces the eight-step column with the checkpoint in `$CHECKPOINT`.
+
+```sh
+uv run --frozen --extra eval scripts/baseline.py lvr --size 3b --checkpoint "$CHECKPOINT" --lvr-steps 8 --batch-size 64 --output results/lvr-3b-8
+```
+
+| Metric (%) | Local base | Local 4 | Paper 4 | Local 8 | Paper 8 | Local 16 | Paper 16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| V* overall | 75.39 | 68.59 | 64.9 | 69.11 | 65.5 | 69.63 | 66.5 |
+| V* Direct Attributes | 84.35 | 74.78 | 69.6 | 74.78 | 71.3 | 76.52 | 71.3 |
+| V* Relative Position | 61.84 | 60.53 | 60.5 | 59.21 | 60.5 | 59.21 | 56.6 |
+| MMVP question accuracy | 64.00 | 64.67 | 54.7 | 65.33 | 56.0 | 65.00 | 56.0 |
+| MMVP pair accuracy | 34.00 | 33.33 | — | 34.67 | — | 36.00 | — |
+| BLINK IQ-Test | 26.67 | 30.00 | 29.3 | 31.33 | 30.7 | 29.33 | 30.0 |
+| BLINK Jigsaw | 38.67 | 52.67 | 52.7 | 52.67 | 52.7 | 52.67 | 52.0 |
+
+For this checkpoint, eight-step decoding on the same 64 high-resolution V* questions gave the following throughput on one A100 80 GB. We used 64 concurrent requests in the full evaluation.
+
+| Concurrent requests | Questions/s | Mean GPU utilization (%) | Peak GPU memory (GiB) |
+| ---: | ---: | ---: | ---: |
+| 16 | 1.715 | 86.4 | 42.75 |
+| 32 | 1.894 | 93.0 | 42.78 |
+| 64 | 1.913 | 95.3 | 42.78 |
