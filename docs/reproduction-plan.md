@@ -32,6 +32,18 @@ uv run --frozen --extra train --extra eval -m methods.lvr.grpo_calibration --che
 
 To repeat updates 4–6 from a saved state, use the same command with `--resume runs/lvr-3b-calibration/checkpoint-3` and a fresh `--output` directory. The checkpoint includes the policy and processor, AdamW state, step, CPU and GPU RNG states, and digests of the SFT input files and selected images. The reference is reloaded from `--checkpoint`. Each invocation writes one record per completed update to `updates.jsonl`. Set `--learning-rate 5e-6` and use a fresh output to run the matched control with the learning rate in the released 3B launcher. The paper specifies 1e-5. [Author launcher](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/scripts/finetune_lvr_stage2_3b.sh) · [LVR experiment settings](https://arxiv.org/html/2509.24251v2#S4)
 
+To extend a completed six-step run at 5e-6 through update 1,500, pass its final checkpoint and the same SFT reference, data and learning rate:
+
+```sh
+uv run --frozen --extra train --extra eval -m methods.lvr.grpo_calibration \
+  --checkpoint runs/lvr-3b-sft/model --annotations data/lvr/lvr_data/virl39k.json \
+  --images data/lvr/images --learning-rate 5e-6 --steps 1500 \
+  --resume runs/lvr-3b-calibration-5e-6/checkpoint-6 --output runs/lvr-3b-grpo-1500 \
+  --save-at 12 --save-every 100
+```
+
+The first update is 7. The trainer verifies the previous plan's complete sequence of question IDs and image hashes against the start of the extended plan. It saves at global updates 12, 100, 200 and each subsequent multiple of 100, including 1,500. After an interruption, use the highest completed `checkpoint-N` as `--resume`, choose a fresh output directory and keep the target at 1,500. The next update is N + 1. Checkpoints appear under their final name only after the policy, processor and training state have been written. This extension retains the two answer types and the 64-token cap of the six-step run.
+
 Across six updates, each run trained on the same 24 distinct questions and images. The 192 responses comprise 96 letter answers and 96 numeric answers. Accuracy and format below are training rewards. The last column sums forward KL over the entire discrete vocabulary at the final update’s sampled prefixes.
 
 | Learning rate | Correct letters / 96 | Correct numbers / 96 | Full format / 192 | Full format at step 6 / 32 | Sampled KL at step 6 | Conditional KL at step 6 |
