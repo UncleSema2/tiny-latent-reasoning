@@ -1,9 +1,14 @@
+import hashlib
+import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import torch
 from transformers import Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration
 
+from methods.lvr.grpo_calibration import batches
 from methods.lvr.grpo_pilot import GROUP, LATENTS, replay, rewards, rollout
 
 
@@ -59,3 +64,36 @@ class LatentPolicyTests(unittest.TestCase):
         self.assertEqual(rewards(prefix + " <answer>B</answer>", "B"), (1, 1))
         self.assertEqual(rewards(prefix + " <answer>A</answer>", "B"), (0, 1))
         self.assertEqual(rewards("<answer>B</answer>", "B"), (1, 0))
+
+    def test_numeric_rewards_use_exact_values_and_reject_other_expressions(self):
+        for answer in ("0.50", "1/2", "+.5"):
+            self.assertEqual(rewards(f"<answer>{answer}</answer>", "0.5"), (1, 0))
+        for answer in ("1/0", "0.51", "50%", "0.5 or 5", "nan", ""):
+            self.assertEqual(rewards(f"<answer>{answer}</answer>", "0.5"), (0, 0))
+
+    def test_calibration_uses_two_rows_per_kind_without_replacement(self):
+        targets = ["A", "B", "C", "D", "0", "-3", "1/2", "0.25", "5 cm", "x=2"]
+        rows = [
+            {
+                "id": i,
+                "image": f"{i}.png",
+                "conversations": [{}, {"value": f"<answer>{v}</answer>"}],
+            }
+            for i, v in enumerate(targets)
+        ]
+        raw = json.dumps(rows).encode()
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "methods.lvr.grpo_pilot.ANNOTATIONS_SHA256",
+                hashlib.sha256(raw).hexdigest(),
+            ),
+        ):
+            source = Path(directory) / "virl.json"
+            source.write_bytes(raw)
+            groups = batches(source, 2)
+            self.assertEqual(batches(source, 1), groups[:1])
+            self.assertEqual(sorted(r["id"] for g in groups for r in g), list(range(8)))
+            for group in groups:
+                self.assertTrue(all(row["id"] < 4 for row in group[:2]))
+                self.assertTrue(all(row["id"] >= 4 for row in group[2:]))
