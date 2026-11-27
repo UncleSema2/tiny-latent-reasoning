@@ -37,7 +37,9 @@ def held_out(annotations, train, count):
     raise ValueError("Insufficient held-out images")
 
 
-def judge_scores(base, boundaries, prompt, answer, trajectory, generator):
+def judge_scores(
+    base, boundaries, prompt, answer, trajectory, generator, *, per_token=False
+):
     """Score both trajectories with identical image, prompt, delimiters and answer."""
     start, end = boundaries
     n = trajectory.size(1)
@@ -70,11 +72,10 @@ def judge_scores(base, boundaries, prompt, answer, trajectory, generator):
         use_cache=False,
     ).last_hidden_state
     logits = base.lm_head(hidden[:, -answer.size(1) :]).float()
-    return (
-        logits.log_softmax(-1)
-        .gather(-1, answer.expand(2, -1)[..., None])
-        .mean(dim=(1, 2))
+    scores = (
+        logits.log_softmax(-1).gather(-1, answer.expand(2, -1)[..., None]).squeeze(-1)
     )
+    return scores if per_token else scores.mean(dim=1)
 
 
 @torch.inference_mode()

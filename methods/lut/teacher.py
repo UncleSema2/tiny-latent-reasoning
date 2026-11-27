@@ -52,13 +52,14 @@ def teacher_mask(image, latent):
 
 
 class Teacher(torch.nn.Module):
-    def __init__(self, base, boundaries, steps=8):
+    def __init__(self, base, boundaries, steps=8, *, bottleneck=True):
         super().__init__()
         self.base = base
         self.boundaries = boundaries
         self.steps = steps
+        self.bottleneck = bottleneck
 
-    def forward(self, prompt, answer, *, return_trajectory=False):
+    def forward(self, prompt, answer, *, return_trajectory=False, collect_layers=False):
         base = self.base
         decoder = base.model.language_model
         start, end = self.boundaries
@@ -75,7 +76,7 @@ class Teacher(torch.nn.Module):
         )
         indices = torch.arange(ids.size(1), device=ids.device)
         latent = (indices >= prefix_len - 1) & (indices < prefix_len + self.steps)
-        mask = teacher_mask(image, latent)
+        mask = teacher_mask(image, latent) if self.bottleneck else None
         embeddings = base.get_input_embeddings()(ids)
         vision = base.get_image_features(
             prompt["pixel_values"], prompt["image_grid_thw"]
@@ -84,15 +85,27 @@ class Teacher(torch.nn.Module):
             image[None, :, None], torch.cat(vision).to(embeddings.dtype)
         )
 
+        layer_states = []
+
         def decode(inputs, offset, cache):
             stop = offset + inputs.size(1)
-            return decoder(
+            collect_slot = collect_layers and offset >= prefix_len
+            result = decoder(
                 inputs_embeds=inputs,
                 position_ids=positions[..., offset:stop],
-                attention_mask={"full_attention": mask[..., offset:stop, :stop]},
+                attention_mask={"full_attention": mask[..., offset:stop, :stop]}
+                if mask is not None
+                else None,
+                output_hidden_states=collect_slot,
                 past_key_values=cache,
                 use_cache=True,
             )
+            if collect_slot:
+                # Position zero is the recurrent slot even in the final answer call.
+                layer_states.append(
+                    torch.stack([h[0, 0] for h in result.hidden_states[1:]])
+                )
+            return result
 
         result = decode(embeddings[:, :prefix_len], 0, None)
         states = [result.last_hidden_state[:, -1:]]
@@ -105,10 +118,12 @@ class Teacher(torch.nn.Module):
         result = decode(tail, prefix_len + self.steps - 1, result.past_key_values)
         # The closing boundary predicts the first answer token.
         logits = base.lm_head(result.last_hidden_state[:, 1:]).float()
-        ce = F.cross_entropy(logits.flatten(0, 1), answer.flatten())
         trajectory = torch.cat(states, dim=1)
+        if collect_layers:
+            return logits, trajectory, torch.stack(layer_states, dim=1)
         if return_trajectory:
             return logits, trajectory
+        ce = F.cross_entropy(logits.flatten(0, 1), answer.flatten())
         unit = F.normalize(trajectory.float(), dim=-1)
         gram = unit @ unit.transpose(-1, -2)
         diagonal = torch.eye(self.steps, dtype=torch.bool, device=ids.device)
@@ -136,14 +151,30 @@ def epoch_batches(rows, rank, world, completed, processor, images):
             yield *pending[0].result(), pending[1]
 
 
-def save_training_state(base, processor, optim, output, step, recipe, rank):
+def save_training_state(
+    base, processor, optim, output, step, recipe, rank, *, save_rng=False
+):
     target = output / f"checkpoint-{step}"
     stage = output / f".checkpoint-{step}"
+    if save_rng:
+        # A previous interruption may have left an unpublished staging directory.
+        attempt = [None]
+        if rank == 0:
+            from uuid import uuid4
+
+            attempt[0] = uuid4().hex
+        dist.broadcast_object_list(attempt)
+        stage = output / f".checkpoint-{step}-{attempt[0]}"
     if rank == 0:
         stage.mkdir()
     dist.barrier()
     # ZeRO owns a deterministic optimizer partition on each rank.
     torch.save(optim.optim.state_dict(), stage / f"optimizer-{rank}.pt")
+    if save_rng:
+        torch.save(
+            (torch.get_rng_state(), torch.cuda.get_rng_state()),
+            stage / f"rng-{rank}.pt",
+        )
     if rank == 0:
         base.save_pretrained(stage)
         processor.save_pretrained(stage)
