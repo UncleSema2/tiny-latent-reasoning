@@ -43,8 +43,24 @@ def main():
         choices=(4, 8, 16),
         help="Use fixed-step decoding for an LVR checkpoint",
     )
+    parser.add_argument(
+        "--lut-steps",
+        type=int,
+        choices=(8, 10, 12, 16),
+        help="Use fixed-step decoding for a local LUT checkpoint",
+    )
+    parser.add_argument(
+        "--lut-core",
+        action="store_true",
+        help="Evaluate the four perception benchmarks with the LUT training image limits",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--nccl-port",
+        type=int,
+        help="Use a dedicated SGLang rendezvous port for a concurrent evaluation",
+    )
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
     tasks = recipes[args.paper].get(f"tasks_{args.size}")
@@ -52,10 +68,18 @@ def main():
         parser.error(f"No published {args.size} suite for {args.paper}")
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("batch size and limit must be positive")
+    if args.nccl_port is not None and not 1 <= args.nccl_port <= 65535:
+        parser.error("--nccl-port must be between 1 and 65535")
     if args.lvr_steps and (
         args.paper != "lvr" or (args.size == "3b" and not args.checkpoint)
     ):
         parser.error("--lvr-steps requires the LVR suite and a local checkpoint for 3B")
+    if (args.lut_steps or args.lut_core) and args.paper != "lut":
+        parser.error("--lut-steps and --lut-core require the LUT suite")
+    if args.lut_steps and args.checkpoint is None:
+        parser.error("--lut-steps requires a local LUT checkpoint")
+    if args.lut_core:
+        tasks = recipes[args.paper]["core_tasks"]
     checkpoint = args.checkpoint
     if checkpoint is None:
         from huggingface_hub import snapshot_download
@@ -82,7 +106,10 @@ def main():
         f"model={checkpoint.resolve()},gpu_memory_utilization=0.55,"
         f"max_running_requests={args.batch_size},mm_processor_worker_num=1"
     )
+    if args.nccl_port is not None:
+        model_args += f",nccl_port={args.nccl_port}"
     run_kwargs = {}
+    model_package = None
     config = json.loads((checkpoint / "config.json").read_text())
     if config.get("architectures") == ["QwenWithLVR"] and not args.lvr_steps:
         parser.error("Specify --lvr-steps for an LVR checkpoint")
@@ -100,15 +127,38 @@ def main():
     if args.lvr_steps or (checkpoint / "sft_recipe.json").is_file():
         # Float32 optimizer weights must use the BF16 training compute dtype.
         model_args += ",dtype=bfloat16"
+        model_package = "methods.lvr"
+    if args.lut_steps:
+        tokenizer_file = checkpoint / "tokenizer.json"
+        if not tokenizer_file.is_file():
+            parser.error("The LUT checkpoint must contain tokenizer.json")
+        tokens = {
+            row["content"]: row["id"]
+            for row in json.loads(tokenizer_file.read_text())["added_tokens"]
+            if row["special"]
+        }
+        if not {"<latent>", "</latent>"} <= tokens.keys():
+            parser.error("The LUT checkpoint tokenizer must define both delimiters")
+        override = {
+            "lut_steps": args.lut_steps,
+            "lut_start_id": tokens["<latent>"],
+            "lut_end_id": tokens["</latent>"],
+        }
+        model_args += ",json_model_override_args=" + json.dumps(
+            override, separators=(",", ":")
+        )
+        model_args += ",dtype=bfloat16,disable_radix_cache=True"
+        model_package = "methods.lut"
+    if model_package:
         run_kwargs["env"] = {
             **os.environ,
-            "SGLANG_EXTERNAL_MODEL_PACKAGE": "methods.lvr",
+            "SGLANG_EXTERNAL_MODEL_PACKAGE": model_package,
             "PYTHONPATH": os.pathsep.join(
                 filter(None, (str(ROOT), os.environ.get("PYTHONPATH")))
             ),
         }
-    if args.paper in {"lvr", "hylar"}:
-        max_tokens = 5120 if args.paper == "lvr" else 16384
+    if args.paper in {"lvr", "hylar"} or args.lut_core:
+        max_tokens = {"lvr": 5120, "hylar": 16384, "lut": 512}[args.paper]
         image_size = {"shortest_edge": 128 * 28**2, "longest_edge": max_tokens * 28**2}
         config = json.dumps({"image": {"size": image_size}}, separators=(",", ":"))
         model_args += f",mm_process_config={config}"
@@ -131,6 +181,12 @@ def main():
     ]
     if args.lvr_steps:
         command.extend(["--gen_kwargs", "max_new_tokens=512,temperature=0"])
+    if args.lut_core or args.lut_steps:
+        overhead = args.lut_steps + 2 if args.lut_steps else 0
+        answer_budget = 32 if args.lut_core else 512
+        command.extend(
+            ["--gen_kwargs", f"max_new_tokens={answer_budget + overhead},temperature=0"]
+        )
     if args.limit is not None:
         command.extend(["--limit", str(args.limit)])
     with TemporaryDirectory() as directory:

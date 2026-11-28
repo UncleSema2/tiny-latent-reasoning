@@ -11,3 +11,4 @@ tasks_3b = ["vstar_bench", "tlr_hrbench4k_local", "tlr_hrbench8k_local", "mmvp",
 [lut]
 paper = "https://arxiv.org/html/2608.00743v1"
 tasks_7b = ["vstar_bench", "tlr_hrbench4k_local", "tlr_hrbench8k_local", "mmerealworld_lite", "mmstar", "blink", "visualpuzzles_full"]
+core_tasks = ["vstar_bench", "tlr_hrbench4k_local", "tlr_hrbench8k_local", "mmerealworld_lite"]
