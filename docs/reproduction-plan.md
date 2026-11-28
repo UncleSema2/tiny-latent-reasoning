@@ -126,6 +126,19 @@ The command scores all training examples using eight teacher recurrent inputs, m
 
 Repeat the same command with the same output directory and world size after interruption. Each completed block of 16 source examples has an atomic score manifest. Student training resumes at the next update after the latest published checkpoint, including optimizer partitions, RNG states and position in the ordered curriculum. The default checkpoint interval is 250 updates. The final numbered checkpoint contains the student weights and its processor.
 
+### Continue LUT with end-of-answer supervision
+
+This ablation appends the Qwen chat terminator `<|im_end|>` to the student answer targets. It adds one supervised position after the final answer token. The previous run provides the starting weights, curriculum and cached teacher states. The new epoch starts with a fresh AdamW optimizer at a learning rate of 5e-6. Four ranks with four accumulation steps preserve the 16-example update batch. The final update uses all remaining examples.
+
+```sh
+uv run --frozen --extra train torchrun --standalone --nproc-per-node=4 \
+  -m methods.lut.student --continue-from runs/lut-student/checkpoint-3367 \
+  --data data/lut/train.jsonl --images data/cot_image_data \
+  --accumulation-steps 4 --save-every 500 --output runs/lut-student-eos
+```
+
+Restart with the same command to resume the continuation. Compare the final checkpoint with the starting checkpoint at eight latent steps using the same evaluation protocol below. Track the fraction of completions that reach the generation cap alongside overall scores.
+
 ### Evaluate LUT generation
 
 Pass the final numbered student checkpoint to the SGLang runner and choose the latent budget. The four multiple-choice perception benchmarks use the student's training limits of 128 to 512 visual tokens per image. Run the control with the same flag to match image preprocessing, prompts and the 32-token answer budget.
