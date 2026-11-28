@@ -29,12 +29,17 @@ class BaselineTests(unittest.TestCase):
                 tmp,
                 "--output",
                 tmp,
+                "--nccl-port",
+                "23081",
             ]
 
             def inspect(command, *, check, env):
                 self.assertTrue(check)
                 self.assertEqual(env["SGLANG_EXTERNAL_MODEL_PACKAGE"], "methods.lut")
                 self.assertIn("max_new_tokens=42,temperature=0", command)
+                self.assertIn(
+                    "nccl_port=23081", command[command.index("--model_args") + 1]
+                )
                 directory = Path(command[command.index("--tasks") + 1])
                 self.assertEqual(
                     {p.stem for p in directory.glob("*.yaml")},

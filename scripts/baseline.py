@@ -56,6 +56,11 @@ def main():
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--nccl-port",
+        type=int,
+        help="Use a dedicated SGLang rendezvous port for a concurrent evaluation",
+    )
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
     tasks = recipes[args.paper].get(f"tasks_{args.size}")
@@ -63,6 +68,8 @@ def main():
         parser.error(f"No published {args.size} suite for {args.paper}")
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("batch size and limit must be positive")
+    if args.nccl_port is not None and not 1 <= args.nccl_port <= 65535:
+        parser.error("--nccl-port must be between 1 and 65535")
     if args.lvr_steps and (
         args.paper != "lvr" or (args.size == "3b" and not args.checkpoint)
     ):
@@ -99,6 +106,8 @@ def main():
         f"model={checkpoint.resolve()},gpu_memory_utilization=0.55,"
         f"max_running_requests={args.batch_size},mm_processor_worker_num=1"
     )
+    if args.nccl_port is not None:
+        model_args += f",nccl_port={args.nccl_port}"
     run_kwargs = {}
     model_package = None
     config = json.loads((checkpoint / "config.json").read_text())
