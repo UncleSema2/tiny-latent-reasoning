@@ -15,6 +15,7 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration, set_seed
 
+from . import grpo_release
 from .training.__main__ import load_base
 
 ANNOTATIONS_SHA256 = "4527db825fb5725e01e849e6386f8d943315b6ec2f157cbb086911e15a2d7f8f"
@@ -30,13 +31,16 @@ class Action(NamedTuple):
     sampled_logp: float
 
 
-def prepare(model, processor, row, images):
+def prepare(model, processor, row, images, *, released=False):
     question, answer = row["conversations"]
+    text = question["value"]
+    if released:
+        text = re.sub(r"\n?<image>\n?", "", text)
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {
             "role": "user",
-            "content": [{"type": "image"}, {"type": "text", "text": question["value"]}],
+            "content": [{"type": "image"}, {"type": "text", "text": text}],
         },
     ]
     prompt = processor.apply_chat_template(
@@ -56,6 +60,14 @@ def prepare(model, processor, row, images):
     vision = torch.cat(features.pooler_output)
     if ids.eq(model.config.image_token_id).sum() != len(vision):
         raise ValueError(f"Image token count mismatch on {row['id']}")
+    if released:
+        if ids.shape[1] > grpo_release.MAX_PROMPT:
+            ids = ids[:, -grpo_release.MAX_PROMPT :]
+            positions = positions[..., -grpo_release.MAX_PROMPT :]
+            vision = vision[
+                len(vision) - ids.eq(model.config.image_token_id).sum().item() :
+            ]
+        return (ids, positions, vision), answer["value"]
     return (ids, positions, vision), re.fullmatch(
         r"<answer>(.+?)</answer>", answer["value"], re.DOTALL
     )[1]
@@ -70,7 +82,7 @@ def embed_prompt(model, prompt):
 
 
 @torch.no_grad()
-def rollout(model, prompt, stops):
+def rollout(model, prompt, stops, *, released=False):
     _, positions, _ = prompt
     embeds = embed_prompt(model, prompt).expand(GROUP, -1, -1)
     pos = positions.expand(-1, GROUP, -1)
@@ -80,14 +92,19 @@ def rollout(model, prompt, stops):
     remaining = torch.zeros(GROUP, dtype=torch.long, device=model.device)
     alive = torch.ones_like(remaining, dtype=torch.bool)
     trajectories = [[] for _ in range(GROUP)]
-    for t in range(MAX_TOKENS):
+    max_tokens = grpo_release.MAX_COMPLETION if released else MAX_TOKENS
+    for t in range(max_tokens):
         hidden = state.last_hidden_state[:, -1]
         scores = model.lm_head(hidden).float() / TEMPERATURE
         latent = remaining > 0
-        for stop in stops:
-            scores[:, stop].masked_fill_(latent, -torch.inf)
+        if released:
+            cutoff = scores.topk(grpo_release.TOP_K).values[:, -1:]
+            weights = scores.masked_fill(scores < cutoff, -torch.inf).softmax(dim=-1)
+        else:
+            for stop in stops:
+                scores[:, stop].masked_fill_(latent, -torch.inf)
         distribution = scores.log_softmax(dim=-1)
-        tokens = torch.multinomial(distribution.exp(), 1)
+        tokens = torch.multinomial(weights if released else distribution.exp(), 1)
         chosen = distribution.gather(1, tokens).squeeze(1).tolist()
         active = alive.tolist()
         slots = latent.tolist()
@@ -97,8 +114,11 @@ def rollout(model, prompt, stops):
                     Action(token, hidden[i].clone() if slots[i] else None, chosen[i])
                 )
         for stop in stops:
-            alive &= tokens[:, 0] != stop
-        if not alive.any() or t + 1 == MAX_TOKENS:
+            ended = tokens[:, 0] == stop
+            if released:
+                ended &= ~latent
+            alive &= ~ended
+        if not alive.any() or t + 1 == max_tokens:
             break
         embeds = torch.where(
             latent[:, None], hidden, model.get_input_embeddings()(tokens[:, 0])
@@ -141,7 +161,7 @@ def checkpoint_long_replay(decoder, length):
             layer.training = mode
 
 
-def replay_distribution(model, prompt, trajectory):
+def replay_distribution(model, prompt, trajectory, token_mask=None):
     _, pos, _ = prompt
     device = model.device
     ids = torch.tensor([a.token for a in trajectory], device=device)
@@ -158,10 +178,16 @@ def replay_distribution(model, prompt, trajectory):
         hidden = decoder(
             inputs_embeds=inputs, position_ids=positions, use_cache=False
         ).last_hidden_state
-    scores = model.lm_head(hidden[0, -len(ids) :]).float() / TEMPERATURE
-    # Discrete actions outside the latent interval, including the opening decision.
-    mask = torch.tensor([a.latent_input is None for a in trajectory], device=device)
-    return scores[mask].log_softmax(-1), ids[mask, None], mask
+    tail_hidden = hidden[0, -len(ids) :]
+    if token_mask is None:
+        # Calibration scores the opening decision.
+        mask = torch.tensor([a.latent_input is None for a in trajectory], device=device)
+        scores = model.lm_head(tail_hidden).float() / TEMPERATURE
+        scores = scores[mask]
+    else:
+        mask = torch.tensor(token_mask, device=device)
+        scores = model.lm_head(tail_hidden[mask]).float() / TEMPERATURE
+    return scores.log_softmax(-1), ids[mask, None], mask
 
 
 def replay(model, prompt, trajectory):
@@ -194,11 +220,11 @@ def rewards(text, target):
     return int(correct), int(formatted is not None)
 
 
-def load_processor(checkpoint):
+def load_processor(checkpoint, *, released=False):
     processor = AutoProcessor.from_pretrained(checkpoint)
     processor.image_processor.size = {
         "shortest_edge": 128 * 28**2,
-        "longest_edge": 5120 * 28**2,
+        "longest_edge": (grpo_release.MAX_IMAGE_TOKENS if released else 5120) * 28**2,
     }
     return processor
 
@@ -218,17 +244,37 @@ def load_policy(checkpoint, model_class=Qwen2_5_VLForConditionalGeneration):
     return model
 
 
-def make_optimizer(model, learning_rate=1e-5):
-    return torch.optim.AdamW(
-        (p for p in model.parameters() if p.requires_grad),
-        lr=learning_rate,
-        weight_decay=0.0,
-        fused=True,
-    )
+def make_optimizer(model, learning_rate=1e-5, *, released=False):
+    params = [param for param in model.parameters() if param.requires_grad]
+    if released:
+        # The Qwen decoder's biases and normalization scales are one-dimensional.
+        params = [
+            {
+                "params": [p for p in params if p.ndim > 1],
+                "weight_decay": grpo_release.WEIGHT_DECAY,
+            },
+            {"params": [p for p in params if p.ndim <= 1]},
+        ]
+    return torch.optim.AdamW(params, lr=learning_rate, weight_decay=0.0, fused=True)
 
 
-def run_update(model, processor, optimizer, rows, images, reference=None):
-    controls = {processor.tokenizer.eos_token_id, processor.tokenizer.pad_token_id}
+def run_update(
+    model, processor, optimizer, rows, images, reference=None, *, released=False
+):
+    tokenizer = processor.tokenizer
+    eos = tokenizer.eos_token_id
+    controls = {eos, tokenizer.pad_token_id}
+    excluded = controls
+    reward = rewards
+    if released:
+        controls = {eos}
+        excluded = set(tokenizer.all_special_ids) - {
+            model.config.lvr_start_id,
+            model.config.lvr_end_id,
+            model.config.lvr_id,
+            model.config.lvr_latent_end_id,
+        }
+        reward = grpo_release.rewards
     summary = []
     probes = []
     kl_means = []
@@ -238,23 +284,39 @@ def run_update(model, processor, optimizer, rows, images, reference=None):
     replay_errors = []
     for row in rows:
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            prompt, target = prepare(model, processor, row, images)
-            paths = rollout(model, prompt, controls)
+            prompt, target = prepare(model, processor, row, images, released=released)
+            paths = rollout(model, prompt, controls, released=released)
         texts = [
-            processor.tokenizer.decode(
-                [tok for tok, _, _ in path if tok not in controls],
+            tokenizer.decode(
+                [tok for tok, _, _ in path if tok not in excluded],
                 skip_special_tokens=False,
             )
             for path in paths
         ]
-        reward_pairs = [rewards(text, target) for text in texts]
+        reward_pairs = [reward(text, target) for text in texts]
         total = torch.tensor(
             [sum(pair) for pair in reward_pairs], device="cuda", dtype=torch.float32
         )
         advantages = (total - total.mean()) / (total.std() + 1e-4)
-        for path, advantage in zip(paths, advantages, strict=True):
+        masks = [None] * len(paths)
+        denominators = [None] * len(paths)
+        if released:
+            masks = [
+                grpo_release.completion_mask(
+                    path, model.config.lvr_start_id, model.config.lvr_end_id, eos
+                )
+                for path in paths
+            ]
+            denominators = grpo_release.token_denominators(masks)
+        for path, advantage, token_mask, denominator in zip(
+            paths, advantages, masks, denominators, strict=True
+        ):
+            if token_mask is not None and not any(token_mask):
+                continue
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                policy_dist, targets, mask = replay_distribution(model, prompt, path)
+                policy_dist, targets, mask = replay_distribution(
+                    model, prompt, path, token_mask
+                )
                 logp = policy_dist.gather(1, targets).squeeze(1)
             sampled = torch.tensor([a.sampled_logp for a in path], device="cuda")[mask]
             old = logp.detach()
@@ -263,7 +325,9 @@ def run_update(model, processor, optimizer, rows, images, reference=None):
                 reference_logp = old
             else:
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-                    ref_dist, _, _ = replay_distribution(reference, prompt, path)
+                    ref_dist, _, _ = replay_distribution(
+                        reference, prompt, path, token_mask
+                    )
                     reference_logp = ref_dist.gather(1, targets).squeeze(1)
                     # Sum over the vocabulary on the very same replayed prefixes.
                     detached = policy_dist.detach()
@@ -278,9 +342,13 @@ def run_update(model, processor, optimizer, rows, images, reference=None):
                 torch.minimum(ratio * advantage, ratio.clamp(0.8, 1.2) * advantage)
                 - 0.04 * kl
             )
-            (-objective.mean() / (len(rows) * GROUP)).backward()
+            if released:
+                divisor = len(rows) * (GROUP // grpo_release.MICROBATCH) * denominator
+                (-objective.sum() / divisor).backward()
+            else:
+                (-objective.mean() / (len(rows) * GROUP)).backward()
+                probes.append((prompt, path, old.cpu()))
             replay_errors.append((old - sampled).abs().cpu())
-            probes.append((prompt, path, old.cpu()))
         summary.append(
             {
                 "id": row["id"],
@@ -293,7 +361,12 @@ def run_update(model, processor, optimizer, rows, images, reference=None):
                 ],
             }
         )
+        if released:
+            summary[-1]["completion_lengths"] = [len(path) for path in paths]
+            summary[-1]["scored_tokens"] = [sum(mask) for mask in masks]
         print(row["id"], reward_pairs, flush=True)
+    if not replay_errors:
+        raise RuntimeError("No scored completion tokens in the update")
     norm = torch.nn.utils.clip_grad_norm_(
         model.parameters(), 1.0, error_if_nonfinite=True
     ).item()
@@ -315,9 +388,10 @@ def run_update(model, processor, optimizer, rows, images, reference=None):
         "replay_max_abs_logp_error": torch.cat(replay_errors).max().item(),
         "replay_mean_abs_logp_error": torch.cat(replay_errors).mean().item(),
         "update_seconds": update_seconds,
-        "mean_abs_logp_change": sum(changes) / len(changes),
         "peak_gpu_GiB": torch.cuda.max_memory_allocated() / 1024**3,
     }
+    if changes:
+        result["mean_abs_logp_change"] = sum(changes) / len(changes)
     if reference is not None:
         result["mean_reference_kl"] = torch.stack(kl_means).mean().item()
         result["mean_conditional_kl"] = torch.stack(conditional_kls).mean().item()

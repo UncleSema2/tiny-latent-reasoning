@@ -1,4 +1,4 @@
-"""Calibrate single-GPU latent GRPO with letter and numeric ViRL questions."""
+"""Run single-GPU latent GRPO on ViRL with resumable checkpoints."""
 
 import argparse
 import hashlib
@@ -12,9 +12,10 @@ from tempfile import TemporaryDirectory
 from time import perf_counter
 
 import torch
-from transformers import set_seed
+from transformers import get_cosine_schedule_with_warmup, set_seed
 
 from . import grpo_pilot as pilot
+from . import grpo_release
 from .training.__main__ import QwenWithLVR
 
 
@@ -96,22 +97,30 @@ def validate_resume(previous, recipe, step):
         )
 
 
-def save(output, step, model, processor, optimizer, recipe):
+def make_scheduler(optimizer, steps):
+    return get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=math.ceil(steps * grpo_release.WARMUP_RATIO),
+        num_training_steps=steps,
+    )
+
+
+def save(output, step, model, processor, optimizer, recipe, scheduler=None):
     target = output / f"checkpoint-{step}"
     with TemporaryDirectory(dir=output, prefix=".saving-") as temp:
         root = Path(temp)
         model.save_pretrained(root)
         processor.save_pretrained(root)
-        torch.save(
-            {
-                "optimizer": optimizer.state_dict(),
-                "cpu_rng": torch.get_rng_state(),
-                "cuda_rng": torch.cuda.get_rng_state(),
-                "step": step,
-                "recipe": recipe,
-            },
-            root / "training.pt",
-        )
+        state = {
+            "optimizer": optimizer.state_dict(),
+            "cpu_rng": torch.get_rng_state(),
+            "cuda_rng": torch.cuda.get_rng_state(),
+            "step": step,
+            "recipe": recipe,
+        }
+        if scheduler is not None:
+            state["scheduler"] = scheduler.state_dict()
+        torch.save(state, root / "training.pt")
         root.rename(target)
 
 
@@ -119,8 +128,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("checkpoint", "annotations", "images", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
-    parser.add_argument("--steps", type=int, default=6)
-    parser.add_argument("--learning-rate", type=float, default=1e-5)
+    parser.add_argument(
+        "--recipe", choices=("calibration", "released"), default="calibration"
+    )
+    parser.add_argument("--steps", type=int)
+    parser.add_argument("--learning-rate", type=float)
     parser.add_argument(
         "--save-at", type=int, help="Also save at this intermediate update"
     )
@@ -133,16 +145,39 @@ def main():
         help="Calibration checkpoint to restore into a fresh output directory",
     )
     args = parser.parse_args()
+    released = args.recipe == "released"
+    if args.steps is None:
+        args.steps = 1500 if released else 6
+    if args.save_every is None and released:
+        args.save_every = 100
+    if args.learning_rate is None:
+        args.learning_rate = grpo_release.LEARNING_RATE if released else 1e-5
     if args.steps < 1 or args.save_at is not None and not 0 < args.save_at < args.steps:
         parser.error("Use positive steps and an intermediate --save-at")
     if args.save_every is not None and args.save_every < 1:
         parser.error("Use a positive --save-every interval")
     if not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
         parser.error("Use a positive finite learning rate")
-    groups = batches(args.annotations, args.steps)
+    groups = (
+        grpo_release.batches(args.annotations, args.steps, pilot.ANNOTATIONS_SHA256)
+        if released
+        else batches(args.annotations, args.steps)
+    )
     recipe = input_manifest(args.checkpoint, args.images, groups)
     # Recipe version 1 uses the paper learning rate unless an override is recorded.
-    if args.learning_rate != 1e-5:
+    if released:
+        recipe.update(
+            recipe=2,
+            schedule_steps=args.steps,
+            warmup_ratio=grpo_release.WARMUP_RATIO,
+            weight_decay=grpo_release.WEIGHT_DECAY,
+            max_completion=grpo_release.MAX_COMPLETION,
+            max_prompt=grpo_release.MAX_PROMPT,
+            max_image_tokens=grpo_release.MAX_IMAGE_TOKENS,
+            top_k=grpo_release.TOP_K,
+            microbatch=grpo_release.MICROBATCH,
+        )
+    if released or args.learning_rate != 1e-5:
         recipe["learning_rate"] = args.learning_rate
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     torch.use_deterministic_algorithms(True)
@@ -162,14 +197,17 @@ def main():
             parser.error(str(exc))
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "recipe.json").write_text(json.dumps(recipe, indent=2) + "\n")
-    processor = pilot.load_processor(args.checkpoint)
+    processor = pilot.load_processor(args.checkpoint, released=released)
     reference = pilot.load_policy(args.checkpoint, QwenWithLVR).requires_grad_(False)
     model = pilot.load_policy(args.resume or args.checkpoint, QwenWithLVR)
     # Both policies use features from the same frozen SFT vision tower.
     reference.model.visual = model.model.visual
-    optimizer = pilot.make_optimizer(model, args.learning_rate)
+    optimizer = pilot.make_optimizer(model, args.learning_rate, released=released)
+    scheduler = make_scheduler(optimizer, args.steps) if released else None
     if args.resume:
         optimizer.load_state_dict(state["optimizer"])
+        if scheduler is not None:
+            scheduler.load_state_dict(state["scheduler"])
         torch.set_rng_state(state["cpu_rng"])
         torch.cuda.set_rng_state(state["cuda_rng"])
         del state
@@ -178,15 +216,25 @@ def main():
             flush=True,
         )
     for step in range(start + 1, args.steps + 1):
+        learning_rate = optimizer.param_groups[0]["lr"]
         result = pilot.run_update(
-            model, processor, optimizer, groups[step - 1], args.images, reference
+            model,
+            processor,
+            optimizer,
+            groups[step - 1],
+            args.images,
+            reference,
+            released=released,
         )
+        if scheduler is not None:
+            scheduler.step()
+            result["learning_rate"] = learning_rate
         result["step"] = step
         if step in (args.save_at, args.steps) or (
             args.save_every and step % args.save_every == 0
         ):
             before = perf_counter()
-            save(args.output, step, model, processor, optimizer, recipe)
+            save(args.output, step, model, processor, optimizer, recipe, scheduler)
             result["save_seconds"] = perf_counter() - before
         with (args.output / "updates.jsonl").open("a") as f:
             print(json.dumps(result, allow_nan=False), file=f)
