@@ -125,3 +125,16 @@ uv run --frozen --extra train python -m methods.lut.student --teacher runs/lut-t
 The command scores all training examples using eight teacher recurrent inputs, matched random vectors and the learned teacher delimiter embeddings in the frozen judge. It caches retained targets in bfloat16 as eight slot outputs from every decoder layer. It applies the strict −0.5 threshold and trains a fresh base student for one epoch in the low-to-high curriculum using ordinary causal attention, answer cross-entropy and cosine alignment. The visual encoder is frozen. The learning rate is 1e-5 and the alignment coefficient is 1.0 in this reproduction.
 
 Repeat the same command with the same output directory and world size after interruption. Each completed block of 16 source examples has an atomic score manifest. Student training resumes at the next update after the latest published checkpoint, including optimizer partitions, RNG states and position in the ordered curriculum. The default checkpoint interval is 250 updates. The final numbered checkpoint contains the student weights and its processor.
+
+### Evaluate LUT generation
+
+Pass the final numbered student checkpoint to the SGLang runner and choose the latent budget. The four multiple-choice perception benchmarks use the student's training limits of 128 to 512 visual tokens per image. Run the control with the same flag to match image preprocessing, prompts and the 32-token answer budget.
+
+```sh
+uv run --frozen --extra eval scripts/baseline.py lut --lut-core --lut-steps 8 \
+  --checkpoint runs/lut-student/checkpoint-3367 --batch-size 16 --output results/lut-sft-8
+uv run --frozen --extra eval scripts/baseline.py lut --lut-core \
+  --batch-size 16 --output results/lut-base
+```
+
+The decoder emits the opening delimiter, feeds each continuous state back as the next input embedding, then emits the closing delimiter and decodes the answer. The answer scorer receives text with special tokens removed. The count of generated tokens includes the latent placeholders and delimiters. Report the eight-step result separately from the best score per benchmark across budgets 8, 10, 12 and 16. [LUT inference and evaluation](https://arxiv.org/html/2608.00743v1#S4.SS1)
