@@ -75,6 +75,29 @@ At eight latent steps, the step-100 checkpoint solved 14 V* questions missed by 
 
 This experiment used the local SFT checkpoint, a 64-token training completion cap and a constant learning rate. Its two answer types cover 30,458 of the 38,870 annotated ViRL rows. The 1,500 updates used 6,000 distinct rows sampled from those two pools. The released launcher sets a 512-token completion cap, cosine scheduling with 3% warmup and 0.1 weight decay. Its trainer masks tokens from the opening marker through the latent span up to the closing marker. The local calibration scores the opening marker and masks the actions sampled during latent feedback. These differences define the checks needed before testing the released recipe. [LVR Table 2](https://arxiv.org/html/2509.24251v2#S4.T2) · [Released launcher](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/scripts/finetune_lvr_stage2_3b.sh) · [Released trainer](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/src/trainer/grpo_trainer.py#L740-L757)
 
+### Run the released settings on the full ViRL pool
+
+Run the 1,500-update recipe from the original local 3B SFT checkpoint.
+
+```sh
+uv run --frozen --extra train --extra eval -m methods.lvr.grpo_calibration \
+  --recipe released --checkpoint runs/lvr-3b-sft/model \
+  --annotations data/lvr/lvr_data/virl39k.json --images data/lvr/images \
+  --output runs/lvr-3b-grpo-released
+```
+
+The recipe shuffles all 38,870 ViRL questions with seed 42 and uses four distinct questions per update. It generates eight responses per question with temperature 0.9, top-k 50, eight latent steps and a 512-token completion cap. Training caps the prompt at 4,096 tokens and the image at 2,560 visual tokens. Accuracy uses symbolic verification and falls back to answer-string equality. The token loss follows the released LVR-span mask and normalizes by the scored tokens in each four-response microbatch. AdamW uses peak learning rate 5e-6 and weight decay 0.1 on matrix weights. A cosine schedule warms up for 45 updates. [Released launcher](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/scripts/finetune_lvr_stage2_3b.sh) · [Released reward functions](https://github.com/VincentLeebang/lvr/blob/637a9f7e17e865b1372b65f182197fbc4a5a1449/src/train/reward_funcs.py)
+
+The single-GPU implementation processes the groups sequentially and uses the policy rollout's latent vectors for both policy and frozen-reference KL scoring. The released reference recreates latents with its own weights. The training horizon and checkpoint derive from the paper's 1,500-update target and the independent local SFT run.
+
+The trainer saves every 100 updates by default. Use `--save-at 5` to save an additional early checkpoint. To resume, keep the same step target, SFT checkpoint and dataset and pass `--resume PATH` and a fresh `--output` directory. Model, AdamW, scheduler and RNG states restore the next update using the original learning-rate schedule and batch order. Run the evaluation command for each of the fixed budgets 4, 8 and 16 once the checkpoint is ready.
+
+```sh
+uv run --frozen --extra train --extra eval scripts/baseline.py lvr --size 3b \
+  --checkpoint runs/lvr-3b-grpo-released/checkpoint-1500 --lvr-steps 8 \
+  --batch-size 16 --output results/lvr-3b-grpo-released-8
+```
+
 ## LUT
 
 1. Freeze a seeded 60,000-example Visual-CoT sample with stable IDs and source subsets. Project it to image, question and answer. Record the source revision and sample digest so the vanilla SFT control and LUT teacher see the same examples. Treat the sample as a reproduction choice until the authors' exact IDs can be verified.
