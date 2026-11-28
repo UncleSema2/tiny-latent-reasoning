@@ -1,10 +1,11 @@
-"""Score the full dataset, build the LUT curriculum and distill a fresh base student."""
+"""Distill a LUT student or continue it with end-of-answer supervision."""
 
 import argparse
 import fcntl
 import hashlib
 import json
 import os
+from contextlib import nullcontext
 from datetime import timedelta
 from math import ceil
 from pathlib import Path
@@ -70,16 +71,63 @@ def recipe_for(args, world):
     }
 
 
+def continuation_recipe(args, processor, world):
+    initial = args.continue_from
+    source = initial.parent
+    original = json.loads((source / "recipe.json").read_text())
+    state = json.loads((initial / "training_state.json").read_text())
+    manifest = source / "curriculum.json"
+    manifest_hash = digest(manifest)
+    if (
+        original["data_sha256"] != digest(args.data)
+        or state["recipe"]["curriculum_sha256"] != manifest_hash
+        or any(state["recipe"].get(key) != value for key, value in original.items())
+    ):
+        raise ValueError(
+            "Initial checkpoint, training data and cached curriculum must match"
+        )
+    eos = processor.tokenizer.get_added_vocab().get("<|im_end|>")
+    generation = json.loads((initial / "generation_config.json").read_text())
+    eos_ids = generation["eos_token_id"]
+    if eos is None or eos not in (eos_ids if isinstance(eos_ids, list) else [eos_ids]):
+        raise ValueError("Expected <|im_end|> to be a generation EOS token")
+    weights = sorted(initial.glob("*.safetensors"))
+    if not weights:
+        raise ValueError("Expected student safetensors weights")
+    return dict(
+        original,
+        world_size=world,
+        accumulation_steps=args.accumulation_steps,
+        learning_rate=5e-6,
+        answer_eos_id=eos,
+        source_step=state["step"],
+        source_curriculum_sha256=manifest_hash,
+        source_checkpoint_files={
+            path.name: digest(path)
+            for path in weights
+            + sorted(initial.glob("*.json"))
+            + sorted(initial.glob("*.jinja"))
+        },
+    )
+
+
 def train(args, rows, processor, boundaries, recipe, device, rank, world):
-    manifest = args.output / "curriculum.json"
+    source = args.continue_from.parent if args.continue_from else args.output
+    manifest = source / "curriculum.json"
     schedule = json.loads(manifest.read_text())
     ids = schedule["low"] + schedule["high"]
     if not ids:
         raise ValueError("No trajectories passed the utility threshold")
     by_id = {r["id"]: (i, r) for i, r in enumerate(rows)}
     ordered = [by_id[key][1] for key in ids]
-    updates = ceil(len(ordered) / world)
-    recipe = dict(recipe, curriculum_sha256=digest(manifest), updates=updates)
+    accumulate = args.accumulation_steps
+    batch_size = world * accumulate
+    updates = ceil(len(ordered) / batch_size)
+    eos = recipe.get("answer_eos_id")
+    manifest_hash = digest(manifest)
+    if args.continue_from and recipe["source_curriculum_sha256"] != manifest_hash:
+        raise ValueError("Cached curriculum changed")
+    recipe = dict(recipe, curriculum_sha256=manifest_hash, updates=updates)
     checkpoints = sorted(
         args.output.glob("checkpoint-[0-9]*"), key=lambda p: int(p.name.split("-")[1])
     )
@@ -92,7 +140,7 @@ def train(args, rows, processor, boundaries, recipe, device, rank, world):
             raise ValueError("Checkpoint does not match the student curriculum")
         if completed == updates:
             return
-    base = load_model(resume or args.base, device)
+    base = load_model(resume or args.continue_from or args.base, device)
     base.model.visual.requires_grad_(False)
     model = DistributedDataParallel(
         Teacher(base, boundaries, bottleneck=False).train(),
@@ -117,43 +165,59 @@ def train(args, rows, processor, boundaries, recipe, device, rank, world):
         )
         torch.set_rng_state(cpu)
         torch.cuda.set_rng_state(gpu)
-    batches = epoch_batches(ordered, rank, world, completed, processor, args.images)
-    for step, (prompt, answer, weight) in enumerate(batches, completed + 1):
-        offset = (step - 1) * world
+    start = completed * accumulate
+    batches = epoch_batches(ordered, rank, world, start, processor, args.images)
+    for micro, (prompt, answer, weight) in enumerate(batches, start):
+        step = micro // accumulate + 1
+        offset = micro * world
         active = min(world, len(ids) - offset)
+        final_micro = (micro + 1) % accumulate == 0 or offset + active == len(ids)
+        weight *= active / min(batch_size, len(ids) - (step - 1) * batch_size)
+        log_step = step == completed + 1 or step % 10 == 0 or step == updates
+        if micro % accumulate == 0:
+            optim.zero_grad(set_to_none=True)
+            stats = torch.zeros(2 if eos is None else 3, device=device)
         key = ids[offset + (rank if rank < active else 0)]
         chunk = by_id[key][0] // CHUNK
         with safe_open(
-            args.output / "scores" / f"{chunk}.safetensors", framework="pt"
+            source / "scores" / f"{chunk}.safetensors", framework="pt"
         ) as target:
             layers = target.get_tensor(key).to(device)
         answer = answer.to(device)
-        optim.zero_grad(set_to_none=True)
-        logits, _, predicted = model(prompt.to(device), answer, collect_layers=True)
-        if predicted.shape != layers.shape:
-            raise ValueError("Teacher/student layer shapes differ")
-        ce = F.cross_entropy(logits.flatten(0, 1), answer.flatten())
-        alignment = (
-            1 - F.cosine_similarity(predicted.float(), layers.float(), dim=-1).mean()
-        )
-        ((ce + recipe["alignment_weight"] * alignment) * weight).backward()
+        if eos is not None:
+            answer = torch.cat((answer, answer.new_full((1, 1), eos)), dim=1)
+        with nullcontext() if final_micro else model.no_sync():
+            logits, _, predicted = model(prompt.to(device), answer, collect_layers=True)
+            if predicted.shape != layers.shape:
+                raise ValueError("Teacher/student layer shapes differ")
+            ce = F.cross_entropy(logits.flatten(0, 1), answer.flatten())
+            alignment = (
+                1
+                - F.cosine_similarity(predicted.float(), layers.float(), dim=-1).mean()
+            )
+            ((ce + recipe["alignment_weight"] * alignment) * weight).backward()
+        if log_step:
+            losses = [ce.detach(), alignment.detach()]
+            if eos is not None:
+                losses.append(F.cross_entropy(logits[:, -1].detach(), answer[:, -1]))
+            stats += torch.stack(losses) * weight
+        if not final_micro:
+            continue
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
         optim.step()
-        if step == completed + 1 or step % 10 == 0 or step == updates:
-            stats = torch.stack([ce.detach(), alignment.detach()]) * weight
+        if log_step:
             dist.all_reduce(stats, op=dist.ReduceOp.AVG)
             if rank == 0:
-                print(
-                    json.dumps(
-                        {
-                            "step": step,
-                            "updates": updates,
-                            "ce": stats[0].item(),
-                            "alignment": stats[1].item(),
-                        }
-                    ),
-                    flush=True,
-                )
+                ce_avg, align_avg, *eos_ce = stats.tolist()
+                report = {
+                    "step": step,
+                    "updates": updates,
+                    "ce": ce_avg,
+                    "alignment": align_avg,
+                }
+                if eos is not None:
+                    report["eos_ce"] = eos_ce[0]
+                print(json.dumps(report), flush=True)
         if step % args.save_every == 0 or step == updates:
             save_training_state(
                 base, processor, optim, args.output, step, recipe, rank, save_rng=True
@@ -162,13 +226,23 @@ def train(args, rows, processor, boundaries, recipe, device, rank, world):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("data", "teacher", "images", "output"):
+    for name in ("data", "images", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--teacher", type=Path)
+    source.add_argument(
+        "--continue-from",
+        type=Path,
+        help="Start from a numbered student checkpoint and supervise <|im_end|> on its cached curriculum",
+    )
     parser.add_argument("--base", default=BASE)
     parser.add_argument("--save-every", type=int, default=250)
+    parser.add_argument("--accumulation-steps", type=int, default=1)
     args = parser.parse_args()
     if args.save_every <= 0:
         parser.error("--save-every must be positive")
+    if args.accumulation_steps <= 0:
+        parser.error("--accumulation-steps must be positive")
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
     torch.cuda.set_device(device)
     dist.init_process_group("nccl", device_id=device, timeout=timedelta(hours=2))
@@ -178,11 +252,19 @@ def main():
         rows = [json.loads(line) for line in source]
     if not rows or len({r["id"] for r in rows}) != len(rows):
         raise ValueError("Expected nonempty training data with unique IDs")
+    processor = AutoProcessor.from_pretrained(args.continue_from or args.teacher)
+    boundaries = processor.tokenizer.convert_tokens_to_ids(list(BOUNDARIES))
     if rank == 0:
         args.output.mkdir(parents=True, exist_ok=True)
         lock = (args.output / ".lock").open("a")
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        recipe = recipe_for(args, world)
+        recipe = (
+            continuation_recipe(args, processor, world)
+            if args.continue_from
+            else recipe_for(args, world)
+        )
+        if args.accumulation_steps != 1:
+            recipe["accumulation_steps"] = args.accumulation_steps
         recipe_path = args.output / "recipe.json"
         if recipe_path.exists():
             if json.loads(recipe_path.read_text()) != recipe:
@@ -191,22 +273,22 @@ def main():
             if any(p.name != ".lock" for p in args.output.iterdir()):
                 raise ValueError("Output directory contains unrelated artifacts")
             write_json(recipe_path, recipe)
-        (args.output / "scores").mkdir(exist_ok=True)
+        if args.teacher:
+            (args.output / "scores").mkdir(exist_ok=True)
     dist.barrier()
     recipe = json.loads((args.output / "recipe.json").read_text())
-    processor = AutoProcessor.from_pretrained(args.teacher)
-    boundaries = processor.tokenizer.convert_tokens_to_ids(list(BOUNDARIES))
-    score_chunks(args, rows, processor, boundaries, device, rank, world)
-    torch.cuda.empty_cache()
-    dist.barrier()
-    if rank == 0:
-        manifest = curriculum(rows, args.output / "scores")
-        write_json(args.output / "curriculum.json", manifest)
-        print(
-            json.dumps({k: manifest[k] for k in ("input_count", "filtered_count")}),
-            flush=True,
-        )
-    dist.barrier()
+    if args.teacher:
+        score_chunks(args, rows, processor, boundaries, device, rank, world)
+        torch.cuda.empty_cache()
+        dist.barrier()
+        if rank == 0:
+            manifest = curriculum(rows, args.output / "scores")
+            write_json(args.output / "curriculum.json", manifest)
+            print(
+                json.dumps({k: manifest[k] for k in ("input_count", "filtered_count")}),
+                flush=True,
+            )
+        dist.barrier()
     train(args, rows, processor, boundaries, recipe, device, rank, world)
     dist.barrier()
     dist.destroy_process_group()
